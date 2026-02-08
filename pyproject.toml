@@ -22,4 +22,4 @@ vision = [
 indigo = "indigo.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["indigo*"]
+include = ["indigo*", "scripts*"]

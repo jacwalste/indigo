@@ -11,7 +11,7 @@ import os
 import subprocess
 import shutil
 import time
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
 
 
 class RuneLiteManager:
@@ -157,32 +157,42 @@ class RuneLiteManager:
             self._log(f"Launch failed: {e}")
             return False
 
-    def wait_for_window(self, timeout: int = 60) -> bool:
-        self._log(f"Waiting for window (timeout: {timeout}s)")
+    # Main game window is ~765px wide; loader/splash is much smaller
+    MAIN_WINDOW_MIN_WIDTH = 500
+
+    def wait_for_window(self, timeout: int = 120) -> bool:
+        self._log(f"Waiting for main window (timeout: {timeout}s)")
         start = time.time()
 
+        # Phase 1: wait for any window
         while time.time() - start < timeout:
             if self._window_exists():
                 elapsed = time.time() - start
                 self._log(f"Window detected after {elapsed:.1f}s")
+                break
+            time.sleep(2)
+        else:
+            if self.is_running():
+                self._log("No window detected, but process running")
+            else:
+                self._log("Window not detected and process not running")
+                return False
+
+        # Phase 2: wait for main window (not loader) by checking width
+        self._log("Waiting for main window (loader may appear first)...")
+        while time.time() - start < timeout:
+            size = self.get_window_size()
+            if size and size[0] >= self.MAIN_WINDOW_MIN_WIDTH:
+                self._log(f"Main window ready ({size[0]}x{size[1]})")
                 time.sleep(0.5)
                 self._position_window()
                 return True
-
-            if time.time() - start > 10 and self.is_running():
-                self._log("Window detection timed out, but process running")
-                self._position_window()
-                return True
-
             time.sleep(2)
 
-        if self.is_running():
-            self._log("Proceeding despite window detection failure")
-            self._position_window()
-            return True
-
-        self._log("Window not detected")
-        return False
+        # Fallback: position whatever we have
+        self._log("Timed out waiting for main window, positioning current window")
+        self._position_window()
+        return True
 
     def _window_exists(self) -> bool:
         script = '''
@@ -209,6 +219,8 @@ class RuneLiteManager:
     def _position_window(self) -> bool:
         self._log(f"Positioning window at ({self.window_x}, {self.window_y})")
         script = f'''
+        tell application "RuneLite" to activate
+        delay 0.3
         tell application "System Events"
             tell process "RuneLite"
                 if (count of windows) > 0 then
@@ -223,15 +235,67 @@ class RuneLiteManager:
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=10
             )
             success = result.stdout.strip().lower() == "true"
             if success:
                 self._log(f"Window positioned at ({self.window_x}, {self.window_y})")
+            else:
+                self._log("Window positioning returned false (no window found?)")
+                if result.stderr.strip():
+                    self._log(f"  stderr: {result.stderr.strip()}")
             return success
         except Exception as e:
             self._log(f"Failed to position window: {e}")
             return False
+
+    def get_window_position(self) -> Optional[Tuple[int, int]]:
+        """Get RuneLite window position via AppleScript."""
+        script = '''
+        tell application "System Events"
+            tell process "RuneLite"
+                if (count of windows) > 0 then
+                    set winPos to position of window 1
+                    return (item 1 of winPos as text) & "," & (item 2 of winPos as text)
+                end if
+            end tell
+        end tell
+        '''
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and "," in result.stdout:
+                parts = result.stdout.strip().split(",")
+                return (int(parts[0]), int(parts[1]))
+        except Exception:
+            pass
+        return None
+
+    def get_window_size(self) -> Optional[Tuple[int, int]]:
+        """Get RuneLite window size via AppleScript."""
+        script = '''
+        tell application "System Events"
+            tell process "RuneLite"
+                if (count of windows) > 0 then
+                    set winSize to size of window 1
+                    return (item 1 of winSize as text) & "," & (item 2 of winSize as text)
+                end if
+            end tell
+        end tell
+        '''
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and "," in result.stdout:
+                parts = result.stdout.strip().split(",")
+                return (int(parts[0]), int(parts[1]))
+        except Exception:
+            pass
+        return None
 
     def close(self, timeout: int = 10) -> bool:
         if not self.is_running():
