@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "indigo"
+version = "0.1.0"
+description = "OSRS Color Bot Framework"
+requires-python = ">=3.10"
+dependencies = [
+    "pynput>=1.7.6",
+]
+
+[project.optional-dependencies]
+vision = [
+    "mss>=9.0.0",
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+]
+
+[project.scripts]
+indigo = "indigo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["indigo*"]
