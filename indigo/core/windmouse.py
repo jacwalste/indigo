@@ -217,8 +217,12 @@ class WindMouse:
                 w_x = w_x / sqrt_3 + (2 * self._random.random() - 1) * w_mag / sqrt_5
                 w_y = w_y / sqrt_3 + (2 * self._random.random() - 1) * w_mag / sqrt_5
             else:
-                w_x = w_x / sqrt_3
-                w_y = w_y / sqrt_3
+                # Convergence zone: dampen wind and velocity proportional to closeness
+                dampen = dist / D_0  # 1.0 at edge, 0.0 at target
+                w_x *= dampen * 0.5
+                w_y *= dampen * 0.5
+                v_x *= 0.6 + 0.4 * dampen  # scale from 1.0 (edge) to 0.6 (target)
+                v_y *= 0.6 + 0.4 * dampen
 
             dir_x = end_x - x
             dir_y = end_y - y
@@ -239,22 +243,17 @@ class WindMouse:
                 v_y = dir_y * min_velocity
                 v_mag = min_velocity
 
-            if v_mag > M_0:
-                random_clamp = M_0 / 2 + self._random.random() * M_0 / 2
+            # Clamp max speed, scale down near target
+            effective_max = M_0 if dist >= D_0 else M_0 * (0.3 + 0.7 * dist / D_0)
+            if v_mag > effective_max:
+                random_clamp = effective_max / 2 + self._random.random() * effective_max / 2
                 v_x = (v_x / v_mag) * random_clamp
                 v_y = (v_y / v_mag) * random_clamp
 
             x += v_x
             y += v_y
 
-            prev_dist = dist
             dist = math.sqrt((end_x - x) ** 2 + (end_y - y) ** 2)
-
-            if dist < D_0 and dist >= prev_dist * 0.99:
-                remaining = min(M_0, dist)
-                x += dir_x * remaining
-                y += dir_y * remaining
-                dist = math.sqrt((end_x - x) ** 2 + (end_y - y) ** 2)
 
             points.append(Point(x, y))
 

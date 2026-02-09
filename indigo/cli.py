@@ -387,7 +387,7 @@ def cmd_test_drop(args):
                 continue
             if not vision.slot_has_item(idx):
                 continue
-            cx, cy = vision.slot_screen_center(idx)
+            cx, cy = vision.slot_screen_click_point(idx)
             _log(f"Dropping slot {idx} at ({cx}, {cy})")
             inp.shift_click(cx, cy)
             delay.sleep(FAST_ACTION, include_pauses=False)
@@ -453,8 +453,338 @@ def cmd_run_shrimp(args):
         stop_flag=stop_flag,
     )
 
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
     max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
     script = ShrimpScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_run_trees(args):
+    """Run normal trees woodcutting script."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.woodcutting.trees import TreesScript
+
+    print("=== Normal Trees (Lumbridge) ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    light = args.light if hasattr(args, "light") else False
+    script = TreesScript(ctx=ctx, max_hours=max_hours, light=light, on_log=_log)
+
+    # Wait for backtick to start
+    mode = "light" if light else "drop"
+    _wait_for_hotkey(f"\nPress ` (backtick) to start ({mode} mode)...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_test_coords(args):
+    """Live mouse position readout — screen and game-relative coords."""
+    from .vision import Vision
+
+    print("=== Coordinate Inspector ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    gx, gy = game_origin
+
+    print(f"Game origin: ({gx}, {gy})")
+    print("Move your mouse. Press Ctrl+C to stop.\n")
+    print(f"  {'Screen':>16}  {'Game-Relative':>16}")
+    print(f"  {'------':>16}  {'-------------':>16}")
+
+    from pynput.mouse import Controller as MouseController
+    mouse = MouseController()
+
+    try:
+        while True:
+            pos = mouse.position
+            sx, sy = int(pos[0]), int(pos[1])
+            rx, ry = sx - gx, sy - gy
+            print(f"  ({sx:4d}, {sy:4d})    ({rx:4d}, {ry:4d})    ", end="\r")
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\n\nDone.")
+
+
+def cmd_run_oaks(args):
+    """Run oak trees woodcutting script (banking via deposit box)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.woodcutting.oaks import OaksScript
+
+    print("=== Oak Trees (Deposit Box Banking) ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = OaksScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_run_willows(args):
+    """Run willow trees woodcutting script (banking via deposit box)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.woodcutting.willows import WillowsScript
+
+    print("=== Willow Trees (Deposit Box Banking) ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = WillowsScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_run_rooftop(args):
+    """Run rooftop agility script."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.agility.rooftop import RooftopScript
+
+    print("=== Rooftop Agility ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors — tuned for agility (more active, shorter gaps)
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    idle._burst_chance = rng.truncated_gauss(0.18, 0.04, 0.12, 0.25)
+    idle._min_burst_gap = rng.truncated_gauss(8.0, 2.0, 5.0, 12.0)
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = RooftopScript(ctx=ctx, max_hours=max_hours, on_log=_log)
 
     # Wait for backtick to start
     _wait_for_hotkey("\nPress ` (backtick) to start...")
@@ -552,6 +882,9 @@ def main():
     drop_parser.add_argument("--skip", type=str, default="0", help="Slots to skip (e.g. '0', '0,1', '0-3')")
     drop_parser.set_defaults(func=cmd_test_drop)
 
+    coords_parser = test_subparsers.add_parser("coords", help="Live mouse coordinate readout")
+    coords_parser.set_defaults(func=cmd_test_coords)
+
     # run
     run_parser = subparsers.add_parser("run", help="Run a bot script")
     run_subparsers = run_parser.add_subparsers(dest="run_command")
@@ -559,6 +892,23 @@ def main():
     shrimp_parser = run_subparsers.add_parser("shrimp", help="Fish shrimp at Lumbridge")
     shrimp_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     shrimp_parser.set_defaults(func=cmd_run_shrimp)
+
+    trees_parser = run_subparsers.add_parser("trees", help="Chop normal trees at Lumbridge")
+    trees_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    trees_parser.add_argument("--light", action="store_true", help="Light logs with tinderbox (slot 0) instead of dropping")
+    trees_parser.set_defaults(func=cmd_run_trees)
+
+    oaks_parser = run_subparsers.add_parser("oaks", help="Chop oak trees (bank via deposit box)")
+    oaks_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    oaks_parser.set_defaults(func=cmd_run_oaks)
+
+    willows_parser = run_subparsers.add_parser("willows", help="Chop willow trees (bank via deposit box)")
+    willows_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    willows_parser.set_defaults(func=cmd_run_willows)
+
+    rooftop_parser = run_subparsers.add_parser("rooftop", help="Run rooftop agility course")
+    rooftop_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    rooftop_parser.set_defaults(func=cmd_run_rooftop)
 
     args = parser.parse_args()
 

@@ -8,12 +8,13 @@ State machine:
     FIND_SPOT -> CLICK_SPOT -> WAITING -> DROPPING -> FIND_SPOT
 """
 
+import time
 from enum import Enum, auto
 from typing import Optional, Callable
 
 from indigo.script import Script, ScriptConfig, ScriptContext
-from indigo.vision import Color, GameRegions, ColorCluster
-from indigo.core.timing import FAST_ACTION, NORMAL_ACTION
+from indigo.vision import Color, ColorCluster
+from indigo.core.timing import NORMAL_ACTION
 
 
 class State(Enum):
@@ -26,18 +27,14 @@ class State(Enum):
 # Cyan from NPC Indicators plugin: #00FFFF
 FISHING_SPOT_COLOR = Color(r=0, g=255, b=255)
 
-# Drop slots in column order (skip slot 0 = fishing net)
-# Columns: [0,4,8,12,16,20,24], [1,5,9,13,17,21,25], [2,6,10,14,18,22,26], [3,7,11,15,19,23,27]
-DROP_ORDER = []
-for col in range(4):
-    for row in range(7):
-        slot = row * 4 + col
-        if slot != 0:
-            DROP_ORDER.append(slot)
 
 
 class ShrimpScript(Script):
     """Fish shrimp and drop them."""
+
+    # How long (seconds) with no new fish before we assume we stopped fishing
+    IDLE_TIMEOUT_MIN = 45.0
+    IDLE_TIMEOUT_MAX = 75.0
 
     def __init__(self, ctx: ScriptContext, max_hours: float = 6.0,
                  on_log: Optional[Callable[[str], None]] = None):
@@ -50,37 +47,19 @@ class ShrimpScript(Script):
         self._last_spot: Optional[ColorCluster] = None
         self._drop_threshold = 20
         self._wait_checks = 0
+        self._last_inv_count = 0
+        self._last_gain_time = 0.0
+        self._idle_timeout = 60.0
 
     def on_start(self) -> None:
         self._log("Fishing shrimp - ensure NPC Indicators is on (cyan)")
-        self._randomize_drop_threshold()
-
-    def _randomize_drop_threshold(self) -> None:
-        """Randomize when to start dropping (anti-detection)."""
-        self._drop_threshold = int(self.ctx.rng.truncated_gauss(
-            mean=12, stddev=3, min_val=8, max_val=15,
-        ))
-        self._log(f"Drop threshold: {self._drop_threshold}")
-
-    def _find_spot(self) -> Optional[ColorCluster]:
-        """Find the largest cyan cluster in the game view."""
-        clusters = self.ctx.vision.find_color_clusters(
-            GameRegions.GAME_VIEW,
-            FISHING_SPOT_COLOR,
-            tolerance=15,
-            min_area=40,
-        )
-        return clusters[0] if clusters else None
-
-    def _spot_drifted(self, old: ColorCluster, new: ColorCluster) -> bool:
-        """Check if spot moved significantly."""
-        dx = abs(old.click_point[0] - new.click_point[0])
-        dy = abs(old.click_point[1] - new.click_point[1])
-        return (dx + dy) > 80
+        self._drop_threshold = self.randomize_drop_threshold(mean=12, stddev=3, min_val=8, max_val=15)
+        self._fish_caught = 0
+        self._drop_cycles = 0
 
     def loop(self) -> None:
         if self._state == State.FIND_SPOT:
-            spot = self._find_spot()
+            spot = self.find_target(FISHING_SPOT_COLOR)
             if spot:
                 self._last_spot = spot
                 self._state = State.CLICK_SPOT
@@ -92,54 +71,63 @@ class ShrimpScript(Script):
         elif self._state == State.CLICK_SPOT:
             if self._last_spot:
                 x, y = self._last_spot.click_point
-                self.ctx.input.click(x, y)
+                self.click_target(x, y)
                 self.ctx.delay.sleep(NORMAL_ACTION)
+
+                # Record inventory baseline and start idle timer
+                self._last_inv_count = self.ctx.vision.count_inventory_items(skip_slots=[0])
+                self._last_gain_time = time.time()
+                self._idle_timeout = self.ctx.rng.truncated_gauss(
+                    mean=60.0, stddev=8.0,
+                    min_val=self.IDLE_TIMEOUT_MIN, max_val=self.IDLE_TIMEOUT_MAX,
+                )
                 self._wait_checks = 0
                 self._state = State.WAITING
-                self._log("Clicked fishing spot")
+                self._log(f"Clicked fishing spot (inv={self._last_inv_count})")
 
         elif self._state == State.WAITING:
-            # Check every 1-3 seconds
-            self.ctx.delay.sleep_range(1.0, 3.0)
+            # Poll every 2-4 seconds — just watch inventory
+            self.ctx.delay.sleep_range(2.0, 4.0)
             self._wait_checks += 1
 
-            # Check inventory
+            # Maybe do something human-like
+            if self.ctx.idle:
+                self.ctx.idle.maybe_idle()
+
             inv_count = self.ctx.vision.count_inventory_items(skip_slots=[0])
+
+            # Did we gain fish?
+            if inv_count > self._last_inv_count:
+                self._last_inv_count = inv_count
+                self._last_gain_time = time.time()
+
+            idle_secs = time.time() - self._last_gain_time
+
+            # Periodic status every ~4 checks (~10-15s)
+            if self._wait_checks % 4 == 0:
+                self._log(
+                    f"Fishing... inv={inv_count}/{self._drop_threshold} "
+                    f"idle={idle_secs:.0f}s/{self._idle_timeout:.0f}s "
+                    f"caught={self._fish_caught} drops={self._drop_cycles} "
+                    f"time={self.elapsed_str()}"
+                )
+
+            # Inventory full enough → drop
             if inv_count >= self._drop_threshold:
                 self._log(f"Inventory has {inv_count} items, dropping")
                 self._state = State.DROPPING
                 return
 
-            # Check if spot moved or disappeared
-            spot = self._find_spot()
-            if spot is None:
-                self._log("Spot disappeared, re-finding")
+            # No new fish for a while → stopped fishing, re-click
+            if idle_secs >= self._idle_timeout:
+                self._log(f"No fish for {idle_secs:.0f}s, re-clicking")
                 self._state = State.FIND_SPOT
                 return
-            if self._last_spot and self._spot_drifted(self._last_spot, spot):
-                self._log("Spot moved, re-clicking")
-                self._last_spot = spot
-                self._state = State.CLICK_SPOT
-                return
-
-            # Update spot position
-            self._last_spot = spot
 
         elif self._state == State.DROPPING:
-            self._drop_inventory()
-            self._randomize_drop_threshold()
+            dropped = self.drop_inventory(skip_slots={0}, expected=self._last_inv_count)
+            self._fish_caught += dropped
+            self._drop_cycles += 1
+            self._log(f"Dropped {dropped} items (total caught: {self._fish_caught}, cycle #{self._drop_cycles})")
+            self._drop_threshold = self.randomize_drop_threshold(mean=12, stddev=3, min_val=8, max_val=15)
             self._state = State.FIND_SPOT
-
-    def _drop_inventory(self) -> None:
-        """Shift-click drop all items in column order, skip slot 0."""
-        dropped = 0
-        for slot_idx in DROP_ORDER:
-            if self.should_stop:
-                break
-            if not self.ctx.vision.slot_has_item(slot_idx):
-                continue
-            cx, cy = self.ctx.vision.slot_screen_center(slot_idx)
-            self.ctx.input.shift_click(cx, cy)
-            self.ctx.delay.sleep(FAST_ACTION, include_pauses=False)
-            dropped += 1
-        self._log(f"Dropped {dropped} items")

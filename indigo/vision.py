@@ -8,6 +8,7 @@ GameRegions coordinates are game-relative (assume content area at 0,0).
 Vision uses game_origin to offset these to absolute screen coordinates.
 """
 
+import random
 from dataclasses import dataclass
 from typing import Optional, Callable, List, Tuple
 
@@ -96,6 +97,33 @@ class GameRegions:
     INV_COLS = 4
     INV_ROWS = 7
 
+    # Interface tabs (bottom of side panel, Fixed Classic layout)
+    # Approximate positions — verify with `indigo test vision`
+    TAB_COMBAT = Region(527, 168, 33, 36)
+    TAB_STATS = Region(560, 168, 33, 36)
+    TAB_QUESTS = Region(593, 168, 33, 36)
+    TAB_INVENTORY = Region(626, 168, 33, 36)
+    TAB_EQUIPMENT = Region(659, 168, 33, 36)
+    TAB_PRAYER = Region(692, 168, 33, 36)
+    TAB_MAGIC = Region(725, 168, 33, 36)
+
+    # Browsable tabs (everything except inventory — used by idle browse behavior)
+    BROWSE_TABS = ["TAB_COMBAT", "TAB_STATS", "TAB_QUESTS",
+                   "TAB_EQUIPMENT", "TAB_PRAYER", "TAB_MAGIC"]
+
+    # Stats panel grid: 3 columns x 8 rows (23 skills)
+    # Each skill box is roughly 63x32, starting at ~(554, 210) in the side panel
+    STATS_START_X = 554
+    STATS_START_Y = 210
+    STATS_SKILL_W = 63
+    STATS_SKILL_H = 32
+    STATS_COLS = 3
+    STATS_ROWS = 8
+    STATS_SKILL_COUNT = 23
+
+    # Deposit box interface — placeholder, calibrate with `indigo test coords`
+    DEPOSIT_ALL_BUTTON = Region(124, 285, 34, 26)
+
     @classmethod
     def get_inventory_slot(cls, index: int) -> Region:
         """Get the region for an inventory slot (0-27)."""
@@ -129,7 +157,7 @@ class Vision:
         else:
             print(f"[Vision] {message}")
 
-    def _to_screen(self, x: int, y: int) -> Tuple[int, int]:
+    def to_screen(self, x: int, y: int) -> Tuple[int, int]:
         """Convert game-relative coords to absolute screen coords."""
         return (x + self._game_origin[0], y + self._game_origin[1])
 
@@ -185,8 +213,8 @@ class Vision:
                 cy = y + h // 2
 
             # Convert local contour coords to absolute screen coords
-            screen_cx, screen_cy = self._to_screen(region.x + cx, region.y + cy)
-            screen_x, screen_y = self._to_screen(region.x + x, region.y + y)
+            screen_cx, screen_cy = self.to_screen(region.x + cx, region.y + cy)
+            screen_x, screen_y = self.to_screen(region.x + x, region.y + y)
 
             clusters.append(ColorCluster(
                 center=(screen_cx, screen_cy),
@@ -200,9 +228,29 @@ class Vision:
         return clusters
 
     def slot_screen_center(self, slot_index: int) -> Tuple[int, int]:
-        """Get absolute screen center of an inventory slot."""
+        """Get absolute screen center of an inventory slot (exact)."""
         slot = GameRegions.get_inventory_slot(slot_index)
-        return self._to_screen(*slot.center)
+        return self.to_screen(*slot.center)
+
+    def slot_screen_click_point(self, slot_index: int) -> Tuple[int, int]:
+        """Get a jittered click point within an inventory slot.
+
+        Gaussian spread around center, heavier toward the middle,
+        clamped to slot bounds so we never miss.
+        """
+        slot = GameRegions.get_inventory_slot(slot_index)
+        cx, cy = slot.center
+
+        # Stddev ~1/4 of slot dimension: most clicks land in the inner half
+        jitter_x = random.gauss(0, slot.width * 0.25)
+        jitter_y = random.gauss(0, slot.height * 0.25)
+
+        # Clamp to slot bounds (leave 1px margin)
+        margin = 1
+        x = int(max(slot.x + margin, min(slot.x + slot.width - margin, cx + jitter_x)))
+        y = int(max(slot.y + margin, min(slot.y + slot.height - margin, cy + jitter_y)))
+
+        return self.to_screen(x, y)
 
     def slot_has_item(self, slot_index: int) -> bool:
         """Check if an inventory slot has an item (brightness + variance check)."""
