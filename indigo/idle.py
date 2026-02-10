@@ -372,6 +372,17 @@ class IdleBehavior:
         rng = self._ctx.rng
         inp = self._ctx.input
 
+        # Ensure mouse is over game view — OSRS ignores scroll elsewhere
+        gv = GameRegions.GAME_VIEW
+        mx, my = inp.get_mouse_position()
+        sx, sy = self._ctx.vision.to_screen(gv.x, gv.y)
+        ex, ey = sx + gv.width, sy + gv.height
+        if not (sx <= mx <= ex and sy <= my <= ey):
+            tx = int(rng.truncated_gauss(gv.width / 2, gv.width * 0.15, 30, gv.width - 30))
+            ty = int(rng.truncated_gauss(gv.height / 2, gv.height * 0.15, 30, gv.height - 30))
+            target_x, target_y = self._ctx.vision.to_screen(gv.x + tx, gv.y + ty)
+            inp.move_to(target_x, target_y)
+
         ticks = int(rng.truncated_gauss(3.5, 1.5, 1, 6))
         direction = rng.choice([1, -1])
         inp.scroll(dy=ticks * direction)

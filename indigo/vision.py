@@ -124,6 +124,9 @@ class GameRegions:
     # Deposit box interface — placeholder, calibrate with `indigo test coords`
     DEPOSIT_ALL_BUTTON = Region(124, 285, 34, 26)
 
+    # Bank interface log slot — calibrated with `indigo test bankslot`
+    BANK_LOG_SLOT = Region(410, 264, 29, 25)
+
     @classmethod
     def get_inventory_slot(cls, index: int) -> Region:
         """Get the region for an inventory slot (0-27)."""
@@ -271,6 +274,36 @@ class Vision:
             if self.slot_has_item(i):
                 count += 1
         return count
+
+    def detect_hsv_pixels(
+        self,
+        region: Region,
+        hue_low: int,
+        hue_high: int,
+        sat_min: int = 30,
+        val_min: int = 30,
+    ) -> int:
+        """Count pixels matching an HSV hue range in a region.
+
+        HSV matching is far more robust than BGR for anti-aliased text:
+        hue is preserved even when pixels blend with the background.
+
+        Args:
+            region: Game-relative region to scan.
+            hue_low: Minimum hue (OpenCV 0-180 scale).
+            hue_high: Maximum hue (OpenCV 0-180 scale).
+            sat_min: Minimum saturation (0-255).
+            val_min: Minimum value/brightness (0-255).
+
+        Returns:
+            Number of matching pixels.
+        """
+        frame = self.grab(region)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower = np.array([hue_low, sat_min, val_min])
+        upper = np.array([hue_high, 255, 255])
+        mask = cv2.inRange(hsv, lower, upper)
+        return int(cv2.countNonZero(mask))
 
     @staticmethod
     def detect_game_origin(on_log: Optional[Callable[[str], None]] = None) -> Tuple[int, int]:

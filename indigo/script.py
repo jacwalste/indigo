@@ -13,11 +13,20 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, Callable, List, Set, Tuple, TYPE_CHECKING
 
-from .vision import Vision, Color, ColorCluster, GameRegions
+from .vision import Vision, Color, ColorCluster, GameRegions, Region
 from .input import Input
 from .core.delay import Delay
 from .core.rng import RNG
 from .core.timing import FAST_ACTION, NORMAL_ACTION, CAREFUL_ACTION
+
+# XP drop detection defaults — configure RuneLite XP Drop plugin to magenta (FF00FF).
+# Region calibrated for Fixed Mode: drops appear at x≈505, float from y≈160 up to y≈50.
+XP_DROP_REGION = Region(495, 35, 25, 140)
+XP_DROP_HUE_LOW = 140       # Magenta hue range in OpenCV HSV (0-180)
+XP_DROP_HUE_HIGH = 165
+XP_DROP_SAT_MIN = 30        # Low thresholds to catch anti-aliased pixels
+XP_DROP_VAL_MIN = 30
+XP_DROP_PIXEL_THRESHOLD = 10
 
 if TYPE_CHECKING:
     from .idle import IdleBehavior
@@ -160,6 +169,22 @@ class Script:
         )
         return clusters[0] if clusters else None
 
+    def check_xp_drop(self) -> bool:
+        """Check if an XP drop is visible using HSV hue matching.
+
+        Scans XP_DROP_REGION for magenta-hued pixels. Robust against
+        anti-aliasing because HSV hue is preserved when text blends
+        with varying backgrounds.
+
+        Configure RuneLite XP Drop plugin to use magenta (FF00FF).
+        """
+        pixels = self.ctx.vision.detect_hsv_pixels(
+            XP_DROP_REGION,
+            XP_DROP_HUE_LOW, XP_DROP_HUE_HIGH,
+            XP_DROP_SAT_MIN, XP_DROP_VAL_MIN,
+        )
+        return pixels >= XP_DROP_PIXEL_THRESHOLD
+
     def is_target_near(self, color: Color, point: Tuple[int, int],
                        max_distance: int = 60, tolerance: int = 15,
                        min_area: int = 40) -> bool:
@@ -190,42 +215,172 @@ class Script:
                 return True
         return False
 
-    def search_for_target(self, color: Color, tolerance: int = 15,
-                         min_area: int = 40) -> Optional[ColorCluster]:
-        """Zoom out and rotate camera to search for a target color.
+    def _ensure_mouse_in_game_view(self) -> None:
+        """Move mouse into the game view if it's currently outside.
 
-        Used when find_target() fails repeatedly. Zooms out a bit for wider
-        view, then rotates camera in steps checking for the target after each.
+        Required before scrolling — OSRS only processes scroll/zoom when the
+        mouse is hovering over the game viewport.
+        """
+        gv = GameRegions.GAME_VIEW
+        mx, my = self.ctx.input.get_mouse_position()
+        sx, sy = self.ctx.vision.to_screen(gv.x, gv.y)
+        ex, ey = sx + gv.width, sy + gv.height
 
-        Returns the first ColorCluster found, or None after a full rotation.
+        if sx <= mx <= ex and sy <= my <= ey:
+            return
+
+        rng = self.ctx.rng
+        tx = int(rng.truncated_gauss(gv.width / 2, gv.width * 0.15, 30, gv.width - 30))
+        ty = int(rng.truncated_gauss(gv.height / 2, gv.height * 0.15, 30, gv.height - 30))
+        target_x, target_y = self.ctx.vision.to_screen(gv.x + tx, gv.y + ty)
+        self.ctx.input.move_to(target_x, target_y)
+
+    def _rotate_camera_search(self, key: str, check_fn: Callable):
+        """Rotate camera with varied human-like styles, checking periodically.
+
+        Picks a rotation style randomly each invocation to avoid predictable
+        burst-pause-burst patterns. Each style covers roughly one full rotation.
+
+        Returns whatever check_fn returns when truthy, or None.
         """
         rng = self.ctx.rng
         inp = self.ctx.input
 
-        # Zoom out 2-7 ticks for a wider view
-        zoom_ticks = int(rng.truncated_gauss(4.5, 1.5, 2, 7))
-        inp.scroll(dy=-zoom_ticks)
-        self._log(f"Search: zoomed out {zoom_ticks} ticks")
-        self.ctx.delay.sleep_range(0.2, 0.6)
+        style = rng.weighted_choice(
+            ['fluid', 'burst', 'sweep', 'tap'],
+            [25, 30, 25, 20],
+        )
+        self._log(f"Search rotation: {style}")
 
-        # Rotate camera in steps, checking after each
+        if style == 'fluid':
+            # Long smooth holds — casually spinning the camera
+            steps = int(rng.truncated_gauss(4, 1, 3, 6))
+            for step in range(steps):
+                if self.should_stop:
+                    return None
+                hold = rng.truncated_gauss(2.0, 0.7, 1.0, 4.0)
+                inp.key_hold(key, hold)
+                self.ctx.delay.sleep_range(0.08, 0.25)
+                result = check_fn()
+                if result:
+                    self._log(f"Found after {step + 1} rotations ({style})")
+                    return result
+
+        elif style == 'burst':
+            # Short holds with pauses — checking feel
+            steps = int(rng.truncated_gauss(8, 2, 5, 12))
+            for step in range(steps):
+                if self.should_stop:
+                    return None
+                hold = rng.truncated_gauss(0.5, 0.2, 0.2, 1.0)
+                inp.key_hold(key, hold)
+                pause = rng.truncated_gauss(0.35, 0.15, 0.1, 0.7)
+                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
+                result = check_fn()
+                if result:
+                    self._log(f"Found after {step + 1} rotations ({style})")
+                    return result
+
+        elif style == 'sweep':
+            # Medium varied holds — deliberate sweeping
+            steps = int(rng.truncated_gauss(6, 1.5, 4, 9))
+            for step in range(steps):
+                if self.should_stop:
+                    return None
+                hold = rng.truncated_gauss(1.2, 0.5, 0.4, 2.5)
+                inp.key_hold(key, hold)
+                pause = rng.truncated_gauss(0.2, 0.1, 0.05, 0.5)
+                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
+                result = check_fn()
+                if result:
+                    self._log(f"Found after {step + 1} rotations ({style})")
+                    return result
+
+        elif style == 'tap':
+            # Quick taps with longer pauses — careful searching
+            steps = int(rng.truncated_gauss(12, 3, 8, 18))
+            for step in range(steps):
+                if self.should_stop:
+                    return None
+                hold = rng.truncated_gauss(0.18, 0.06, 0.08, 0.35)
+                inp.key_hold(key, hold)
+                pause = rng.truncated_gauss(0.5, 0.2, 0.2, 1.0)
+                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
+                result = check_fn()
+                if result:
+                    self._log(f"Found after {step + 1} rotations ({style})")
+                    return result
+
+        return None
+
+    def _progressive_search(self, check_fn: Callable):
+        """Progressively zoom out and rotate to find a target.
+
+        Zooms out in phases, rotating camera at each zoom level.
+        Final phase zooms to max distance as a guaranteed fallback.
+
+        Returns whatever check_fn returns when truthy, or None.
+        """
+        rng = self.ctx.rng
+        inp = self.ctx.input
+
+        self._ensure_mouse_in_game_view()
         key = rng.choice(['left', 'right'])
-        for step in range(8):
+        total_zoomed = 0
+
+        # Check current view first — maybe just need to rotate
+        result = check_fn()
+        if result:
+            return result
+
+        # Build zoom-out phases with randomization
+        # ~65% start with a gentle zoom, then medium, then max-out fallback
+        phases = []
+        if rng.chance(0.65):
+            phases.append(int(rng.truncated_gauss(3, 1, 2, 5)))
+        phases.append(int(rng.truncated_gauss(6, 2, 3, 9)))
+        phases.append(int(rng.truncated_gauss(15, 4, 10, 22)))
+
+        for i, zoom_ticks in enumerate(phases):
             if self.should_stop:
                 return None
 
-            # Hold arrow key for a rotation step (~45 degrees)
-            hold = rng.truncated_gauss(0.6, 0.15, 0.35, 0.9)
-            inp.key_hold(key, hold)
-            self.ctx.delay.sleep_range(0.15, 0.5)
+            self._ensure_mouse_in_game_view()
+            inp.scroll(dy=-zoom_ticks)
+            total_zoomed += zoom_ticks
+            self._log(f"Search phase {i + 1}/{len(phases)}: "
+                       f"zoomed out {zoom_ticks} ticks (total: {total_zoomed})")
+            self.ctx.delay.sleep_range(0.2, 0.5)
 
-            # Check for target
-            cluster = self.find_target(color, tolerance=tolerance, min_area=min_area)
-            if cluster:
-                self._log(f"Search: found target after {step + 1} rotation steps")
-                return cluster
+            # Quick check at new zoom level before rotating
+            result = check_fn()
+            if result:
+                return result
 
-        self._log("Search: target not found after full rotation")
+            # Rotate and check
+            result = self._rotate_camera_search(key, check_fn)
+            if result:
+                return result
+
+        return None
+
+    def search_for_target(self, color: Color, tolerance: int = 15,
+                         min_area: int = 40) -> Optional[ColorCluster]:
+        """Progressively zoom out and rotate to search for a target color.
+
+        Starts at current zoom, zooms out in phases with camera rotation
+        at each level. Final phase zooms to max distance as a fallback.
+
+        Returns the first ColorCluster found, or None after exhaustive search.
+        """
+        def check():
+            return self.find_target(color, tolerance=tolerance, min_area=min_area)
+
+        cluster = self._progressive_search(check)
+        if cluster:
+            return cluster
+
+        self._log("Search: target not found after full search")
         return None
 
     def click_region_jittered(self, region: "GameRegions") -> None:

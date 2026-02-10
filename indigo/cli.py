@@ -813,6 +813,214 @@ def cmd_run_rooftop(args):
     print("\nDone.")
 
 
+def cmd_run_bonfire(args):
+    """Run bonfire firemaking script (bank for logs)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.firemaking.bonfire import BonfireScript
+
+    print("=== Bonfire Firemaking ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = BonfireScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_test_grounditem(args):
+    """Live ground item detection test — scans for highlighted items."""
+    from .vision import Vision, Color, GameRegions
+
+    print("=== Ground Item Detection Test ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    color = Color.from_hex("FF00A4FF")
+    print(f"Scanning for color: r={color.r}, g={color.g}, b={color.b} (#00A4FF)")
+    print(f"Game view: {GameRegions.GAME_VIEW.width}x{GameRegions.GAME_VIEW.height}")
+    gv = GameRegions.GAME_VIEW
+    gv_cx = gv.x + gv.width // 2
+    gv_cy = gv.y + gv.height // 2
+    print(f"Game view center (game-rel): ({gv_cx}, {gv_cy})")
+    print("\nWatching... Press Ctrl+C to stop.\n")
+
+    last_count = -1
+    try:
+        while True:
+            clusters = vision.find_color_clusters(
+                GameRegions.GAME_VIEW, color,
+                tolerance=15, min_area=10,
+            )
+
+            if clusters:
+                if len(clusters) != last_count:
+                    print()
+                last_count = len(clusters)
+                lines = [f"  DETECTED — {len(clusters)} cluster(s):"]
+                for i, c in enumerate(clusters[:5]):
+                    bx, by, bw, bh = c.bounding_box
+                    cx, cy = c.center
+                    # Distance from game view center (screen coords)
+                    dist_x = cx - (gv_cx + game_origin[0])
+                    dist_y = cy - (gv_cy + game_origin[1])
+                    dist = (dist_x**2 + dist_y**2) ** 0.5
+                    lines.append(
+                        f"    #{i}: center=({cx},{cy}) area={c.area} "
+                        f"bbox={bw}x{bh} dist_from_center={dist:.0f}px"
+                    )
+                # Overwrite with padding
+                for line in lines:
+                    print(f"\r{line:<80}")
+            else:
+                if last_count != 0:
+                    print()
+                last_count = 0
+                print(f"\r  {'Not detected — no clusters found':<80}", end="")
+
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n\nDone.")
+        vision.close()
+
+
+def cmd_test_xpdrop(args):
+    """Live XP drop detection test — uses HSV hue matching for robustness."""
+    from .vision import Vision
+    from .script import (XP_DROP_REGION, XP_DROP_HUE_LOW, XP_DROP_HUE_HIGH,
+                         XP_DROP_SAT_MIN, XP_DROP_VAL_MIN, XP_DROP_PIXEL_THRESHOLD)
+
+    print("=== XP Drop Detection Test (HSV) ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    region = XP_DROP_REGION
+    print(f"Method:    HSV hue matching (magenta FF00FF)")
+    print(f"Region:    ({region.x}, {region.y}) {region.width}x{region.height}")
+    print(f"Hue:       {XP_DROP_HUE_LOW}-{XP_DROP_HUE_HIGH}  "
+          f"Sat>={XP_DROP_SAT_MIN}  Val>={XP_DROP_VAL_MIN}")
+    print(f"Threshold: {XP_DROP_PIXEL_THRESHOLD} pixels")
+    print("\nWatching for XP drops... Press Ctrl+C to stop.\n")
+
+    detections = 0
+    polls = 0
+    try:
+        while True:
+            pixel_count = vision.detect_hsv_pixels(
+                region, XP_DROP_HUE_LOW, XP_DROP_HUE_HIGH,
+                XP_DROP_SAT_MIN, XP_DROP_VAL_MIN,
+            )
+            polls += 1
+
+            if pixel_count >= XP_DROP_PIXEL_THRESHOLD:
+                detections += 1
+                print(f"\r  XP DROP  |  {pixel_count} px  "
+                      f"detections={detections}  polls={polls}     ")
+            else:
+                status = f"{pixel_count} px" if pixel_count > 0 else "0 px"
+                print(f"\r  No drop  |  {status}  "
+                      f"detections={detections}  polls={polls}     ", end="")
+
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print(f"\n\nSummary: {detections} detections in {polls} polls")
+        if polls > 0:
+            print(f"Detection rate: {detections/polls*100:.1f}%")
+        vision.close()
+
+
+def cmd_test_bankslot(args):
+    """Live mouse position readout for calibrating bank interface slots."""
+    from .vision import Vision
+
+    print("=== Bank Slot Calibrator ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    gx, gy = game_origin
+
+    print(f"Game origin: ({gx}, {gy})")
+    print("Open the bank interface, hover over the log slot.")
+    print("Note the game-relative coords to update GameRegions.BANK_LOG_SLOT.")
+    print("Press Ctrl+C to stop.\n")
+    print(f"  {'Screen':>16}  {'Game-Relative':>16}")
+    print(f"  {'------':>16}  {'-------------':>16}")
+
+    from pynput.mouse import Controller as MouseController
+    mouse = MouseController()
+
+    try:
+        while True:
+            pos = mouse.position
+            sx, sy = int(pos[0]), int(pos[1])
+            rx, ry = sx - gx, sy - gy
+            print(f"  ({sx:4d}, {sy:4d})    ({rx:4d}, {ry:4d})    ", end="\r")
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\n\nDone.")
+
+
 def cmd_test_fatigue(args):
     """Preview fatigue curves."""
     from .core.fatigue import FatigueManager, FATIGUE_CONFIGS
@@ -885,6 +1093,15 @@ def main():
     coords_parser = test_subparsers.add_parser("coords", help="Live mouse coordinate readout")
     coords_parser.set_defaults(func=cmd_test_coords)
 
+    grounditem_parser = test_subparsers.add_parser("grounditem", help="Live ground item detection test")
+    grounditem_parser.set_defaults(func=cmd_test_grounditem)
+
+    xpdrop_parser = test_subparsers.add_parser("xpdrop", help="Live XP drop detection test")
+    xpdrop_parser.set_defaults(func=cmd_test_xpdrop)
+
+    bankslot_parser = test_subparsers.add_parser("bankslot", help="Calibrate bank interface slot coords")
+    bankslot_parser.set_defaults(func=cmd_test_bankslot)
+
     # run
     run_parser = subparsers.add_parser("run", help="Run a bot script")
     run_subparsers = run_parser.add_subparsers(dest="run_command")
@@ -909,6 +1126,10 @@ def main():
     rooftop_parser = run_subparsers.add_parser("rooftop", help="Run rooftop agility course")
     rooftop_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     rooftop_parser.set_defaults(func=cmd_run_rooftop)
+
+    bonfire_parser = run_subparsers.add_parser("bonfire", help="Burn logs at a bonfire (bank for more)")
+    bonfire_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    bonfire_parser.set_defaults(func=cmd_run_bonfire)
 
     args = parser.parse_args()
 
