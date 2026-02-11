@@ -76,12 +76,12 @@ class Path:
 
 
 WINDMOUSE_CONFIGS: Dict[str, WindMouseConfig] = {
-    "default": WindMouseConfig(gravity=9.0, wind=3.0, max_velocity=15.0, distance_threshold=12.0),
-    "direct": WindMouseConfig(gravity=12.0, wind=1.5, max_velocity=18.0, distance_threshold=10.0),
-    "wandering": WindMouseConfig(gravity=6.0, wind=6.0, max_velocity=12.0, distance_threshold=15.0),
-    "precise": WindMouseConfig(gravity=10.0, wind=2.0, max_velocity=10.0, distance_threshold=8.0),
-    "tired": WindMouseConfig(gravity=7.0, wind=4.0, max_velocity=10.0, distance_threshold=14.0, variance=0.15),
-    "caffeinated": WindMouseConfig(gravity=11.0, wind=4.0, max_velocity=20.0, distance_threshold=10.0, variance=0.12),
+    "default": WindMouseConfig(gravity=7.0, wind=5.0, max_velocity=15.0, distance_threshold=12.0),
+    "direct": WindMouseConfig(gravity=10.0, wind=2.5, max_velocity=18.0, distance_threshold=10.0),
+    "wandering": WindMouseConfig(gravity=5.0, wind=7.0, max_velocity=12.0, distance_threshold=15.0),
+    "precise": WindMouseConfig(gravity=8.0, wind=3.0, max_velocity=10.0, distance_threshold=8.0),
+    "tired": WindMouseConfig(gravity=5.5, wind=5.0, max_velocity=10.0, distance_threshold=14.0, variance=0.15),
+    "caffeinated": WindMouseConfig(gravity=9.0, wind=5.0, max_velocity=20.0, distance_threshold=10.0, variance=0.12),
 }
 
 
@@ -206,6 +206,22 @@ class WindMouse:
         if dist < 1:
             return points
 
+        # Arc bias: perpendicular force that curves the path consistently.
+        # ~70% of paths get an arc, 30% go straight (variety).
+        arc_px, arc_py = 0.0, 0.0
+        if self._random.random() < 0.70 and dist > 30:
+            # Perpendicular to the direct line
+            dx = end_x - start_x
+            dy = end_y - start_y
+            line_len = math.sqrt(dx * dx + dy * dy)
+            if line_len > 0.001:
+                perp_x = -dy / line_len
+                perp_y = dx / line_len
+                # Magnitude scales with distance: longer moves get more arc
+                arc_strength = self._random.gauss(0, 0.3) * min(dist / 200.0, 1.0)
+                arc_px = perp_x * arc_strength
+                arc_py = perp_y * arc_strength
+
         max_iterations = max(100, min(5000, int(dist / M_0 * 20)))
         iteration = 0
 
@@ -233,8 +249,10 @@ class WindMouse:
                 dir_y /= dir_len
 
             g_mag = min(G_0, dist)
-            v_x += w_x + g_mag * dir_x
-            v_y += w_y + g_mag * dir_y
+            # Arc bias fades as we approach target (only active in far phase)
+            arc_fade = min(dist / (D_0 * 2), 1.0) if dist >= D_0 else 0.0
+            v_x += w_x + g_mag * dir_x + arc_px * arc_fade
+            v_y += w_y + g_mag * dir_y + arc_py * arc_fade
 
             v_mag = math.sqrt(v_x * v_x + v_y * v_y)
             min_velocity = max(1.0, M_0 * 0.1)
@@ -262,6 +280,55 @@ class WindMouse:
 
         return points
 
+    def _maybe_add_overshoot(self, points: List[Point],
+                             end_x: float, end_y: float) -> List[Point]:
+        """~20% chance to overshoot the target and correct back on longer moves."""
+        if len(points) < 5:
+            return points
+
+        direct_dist = points[0].distance_to(Point(end_x, end_y))
+        if direct_dist < 80 or self._random.random() > 0.20:
+            return points
+
+        # Remove the final snap-to-target point if present
+        if points[-1].x == end_x and points[-1].y == end_y:
+            points = points[:-1]
+
+        # Approach direction from the last few points
+        last = points[-1]
+        prev = points[-3] if len(points) >= 3 else points[0]
+        dx = last.x - prev.x
+        dy = last.y - prev.y
+        mag = math.sqrt(dx * dx + dy * dy)
+        if mag < 0.1:
+            points.append(Point(end_x, end_y))
+            return points
+        dx /= mag
+        dy /= mag
+
+        # Overshoot: 5-15px past target, with slight perpendicular drift
+        overshoot_dist = self._random.gauss(10, 3)
+        overshoot_dist = max(5, min(20, overshoot_dist))
+        perp_drift = self._random.gauss(0, 3)
+
+        over_x = end_x + dx * overshoot_dist + (-dy) * perp_drift
+        over_y = end_y + dy * overshoot_dist + dx * perp_drift
+
+        # Add overshoot point
+        points.append(Point(over_x, over_y))
+
+        # Correction: 1-3 intermediate points curving back
+        corrections = self._random.randint(1, 3)
+        for i in range(corrections):
+            t = (i + 1) / (corrections + 1)
+            cx = over_x + (end_x - over_x) * t + self._random.gauss(0, 1.5)
+            cy = over_y + (end_y - over_y) * t + self._random.gauss(0, 1.5)
+            points.append(Point(cx, cy))
+
+        # Final snap to target
+        points.append(Point(end_x, end_y))
+        return points
+
     def generate(
         self,
         start_x: float, start_y: float,
@@ -271,6 +338,7 @@ class WindMouse:
         base_config = self._get_effective_config(config)
         movement_config = self._apply_per_movement_variation(base_config)
         points = self._generate_path(start_x, start_y, end_x, end_y, movement_config)
+        points = self._maybe_add_overshoot(points, end_x, end_y)
 
         start = Point(start_x, start_y)
         end = Point(end_x, end_y)

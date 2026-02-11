@@ -41,6 +41,10 @@ class Input:
         self._click_hold_min = 0.045
         self._click_hold_max = 0.160
 
+        # Per-move quirk flags
+        self._lift_done = False
+        self._hesitate_done = False
+
     def _log(self, message: str) -> None:
         if self._log_callback:
             self._log_callback(f"[Input] {message}")
@@ -72,30 +76,69 @@ class Input:
         return (int(pos[0]), int(pos[1]))
 
     def move_to(self, x: int, y: int) -> None:
-        """Move mouse to (x, y) using WindMouse path with variable speed."""
+        """Move mouse to (x, y) using WindMouse path with variable speed.
+
+        Includes human-like imperfections:
+        - Trackpad lift: ~6% chance on longer moves, pause + slight reposition
+        - Micro-hesitation: ~12% chance, brief mid-movement freeze
+        - Speed variation: occasional bursts and drags within the movement
+        """
         self._ensure_controllers()
         cx, cy = self.get_mouse_position()
         path = self._windmouse.generate(cx, cy, x, y)
         points = path.get_points_as_int_tuples()
 
         n = len(points)
+        direct_dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+
+        # Pre-decide movement quirks for this move
+        # Trackpad lift: pause + slight reposition mid-movement
+        do_trackpad_lift = direct_dist > 150 and self._rng.chance(0.06)
+        lift_at = self._rng.truncated_gauss(0.5, 0.12, 0.3, 0.7) if do_trackpad_lift else -1
+
+        # Micro-hesitation: brief freeze mid-movement
+        do_hesitate = self._rng.chance(0.12)
+        hesitate_at = self._rng.truncated_gauss(0.5, 0.2, 0.2, 0.8) if do_hesitate else -1
+
+        # Speed zone: a random section of the path is faster or slower
+        zone_start = self._rng.truncated_gauss(0.3, 0.15, 0.1, 0.6)
+        zone_end = zone_start + self._rng.truncated_gauss(0.2, 0.08, 0.1, 0.35)
+        zone_mult = self._rng.truncated_gauss(1.0, 0.4, 0.5, 2.0)
+
         for i, (px, py) in enumerate(points):
             self._mouse.position = (px, py)
 
             if i < n - 1:
+                t = i / max(n - 1, 1)
+
+                # Trackpad lift: pause, shift 1-3px, continue
+                if do_trackpad_lift and not self._lift_done and t >= lift_at:
+                    self._lift_done = True
+                    pause = self._rng.truncated_gauss(0.15, 0.05, 0.08, 0.25)
+                    time.sleep(pause)
+                    shift_x = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                    shift_y = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                    self._mouse.position = (px + shift_x, py + shift_y)
+                    time.sleep(self._rng.truncated_gauss(0.04, 0.015, 0.02, 0.07))
+
+                # Micro-hesitation: brief freeze
+                if do_hesitate and not self._hesitate_done and t >= hesitate_at:
+                    self._hesitate_done = True
+                    pause = self._rng.truncated_gauss(0.06, 0.02, 0.03, 0.10)
+                    time.sleep(pause)
+
                 # Distance to next point
                 nx, ny = points[i + 1]
                 step_dist = math.sqrt((nx - px) ** 2 + (ny - py) ** 2)
 
-                # Progress through path (0.0 = start, 1.0 = end)
-                t = i / max(n - 1, 1)
-
                 # Speed curve: slow start, fast middle, gentle decel at end
-                # Bell-ish shape peaking around t=0.4
                 speed_factor = 0.3 + 0.7 * math.sin(min(t * 1.3, 1.0) * math.pi)
 
-                # Base delay scales with step distance (bigger step = more time)
-                # but inversely with speed factor (faster = less delay)
+                # Apply speed zone variation
+                if zone_start <= t <= zone_end:
+                    speed_factor *= zone_mult
+
+                # Base delay scales with step distance
                 base_ms = 0.5 + step_dist * 0.3
                 delay = (base_ms / max(speed_factor, 0.3)) / 1000.0
 
@@ -104,9 +147,13 @@ class Input:
                 delay *= jitter
 
                 # Clamp to reasonable range
-                delay = max(0.0005, min(delay, 0.008))
+                delay = max(0.0005, min(delay, 0.012))
 
                 time.sleep(delay)
+
+        # Reset per-move flags
+        self._lift_done = False
+        self._hesitate_done = False
 
     def _hold_duration(self) -> float:
         """Generate a Gaussian click hold duration."""

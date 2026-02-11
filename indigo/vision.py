@@ -121,11 +121,20 @@ class GameRegions:
     STATS_ROWS = 8
     STATS_SKILL_COUNT = 23
 
-    # Deposit box interface — placeholder, calibrate with `indigo test coords`
+    # Deposit box interface — calibrate with `indigo test coords`
     DEPOSIT_ALL_BUTTON = Region(124, 285, 34, 26)
+
+    # Bank booth interface — deposit inventory button, calibrate with `indigo test coords`
+    BANK_DEPOSIT_BUTTON = Region(425, 296, 33, 29)
 
     # Bank interface log slot — calibrated with `indigo test bankslot`
     BANK_LOG_SLOT = Region(410, 264, 29, 25)
+
+    # Bank interface second slot (bowstrings) — calibrated with `indigo test bankslot`
+    BANK_BOWSTRING_SLOT = Region(362, 265, 31, 22)
+
+    # Bank interface close button (X) — for humanized bank closing
+    BANK_CLOSE_BUTTON = Region(477, 14, 18, 19)
 
     @classmethod
     def get_inventory_slot(cls, index: int) -> Region:
@@ -304,6 +313,61 @@ class Vision:
         upper = np.array([hue_high, 255, 255])
         mask = cv2.inRange(hsv, lower, upper)
         return int(cv2.countNonZero(mask))
+
+    def template_match_region(
+        self,
+        region: Region,
+        template_path: str,
+        threshold: float = 0.8,
+        padding: int = 40,
+    ) -> bool:
+        """Check if a template image appears near a screen region.
+
+        Uses OpenCV normalized cross-correlation (TM_CCOEFF_NORMED).
+        Grabs a padded area around the region so the template can slide
+        and tolerate small coordinate offsets.
+
+        Handles transparent PNGs by using the alpha channel as a mask.
+
+        Args:
+            region: Game-relative region indicating where to look.
+            template_path: Path to template image file (PNG/JPG).
+            threshold: Minimum match score (0.0-1.0). Default 0.8.
+            padding: Extra pixels around the region to search. Default 40.
+
+        Returns:
+            True if the best match score >= threshold.
+        """
+        # Load template with alpha if present
+        template = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+        if template is None:
+            return False
+
+        mask = None
+        if len(template.shape) == 3 and template.shape[2] == 4:
+            mask = template[:, :, 3]
+            template = template[:, :, :3]
+
+        th, tw = template.shape[:2]
+
+        # Grab a padded region larger than the template for sliding
+        grab_region = Region(
+            x=max(0, region.x - padding),
+            y=max(0, region.y - padding),
+            width=region.width + padding * 2,
+            height=region.height + padding * 2,
+        )
+        frame = self.grab(grab_region)
+
+        if template.shape[0] > frame.shape[0] or template.shape[1] > frame.shape[1]:
+            return False
+
+        if mask is not None:
+            result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+        else:
+            result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        return max_val >= threshold
 
     @staticmethod
     def detect_game_origin(on_log: Optional[Callable[[str], None]] = None) -> Tuple[int, int]:

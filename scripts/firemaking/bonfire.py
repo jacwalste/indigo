@@ -17,10 +17,12 @@ Requires:
 - Logs in the first visible bank slot
 """
 
+import os
 import time
 from enum import Enum, auto
 from typing import Optional, Callable, List
 
+import indigo
 from indigo.script import Script, ScriptConfig, ScriptContext
 from indigo.vision import Color, ColorCluster, GameRegions
 from indigo.core.timing import NORMAL_ACTION
@@ -42,6 +44,11 @@ FIRE_COLOR = Color(r=0, g=255, b=255)
 
 # Red from Object Markers on bank booth: #FF0000
 BANK_COLOR = Color(r=255, g=0, b=0)
+
+# Template for bank interface verification (same deposit button image as deposit box)
+BANK_TEMPLATE = os.path.join(
+    os.path.dirname(indigo.__file__), "templates", "deposit_box.png"
+)
 
 # Time to wait for first XP drop after confirming — if none, bonfire interaction failed
 FIRST_DROP_TIMEOUT = 8.0
@@ -72,6 +79,7 @@ class BonfireScript(Script):
         self._burn_start_count = 0
         self._logs_burned = 0
         self._bank_trips = 0
+        self._bank_fail_streak = 0  # consecutive failed withdrawals
 
         # XP drop tracking
         self._drop_times: List[float] = []
@@ -189,6 +197,11 @@ class BonfireScript(Script):
     # ── BURNING ────────────────────────────────────────────────
 
     def _do_burning(self) -> None:
+        # AFK break only after burning is confirmed (don't interrupt verification).
+        # Fire goes out after 180s — cap AFK at 120s to leave buffer for banking/restarting.
+        if self._burn_confirmed and self.ctx.idle and self.ctx.idle.maybe_afk_break(max_duration=120.0):
+            return
+
         now = time.time()
 
         # Poll for XP drop — debounce so each drop only counts once.
@@ -202,9 +215,9 @@ class BonfireScript(Script):
             if not self._burn_confirmed:
                 self._burn_confirmed = True
                 self._log("Burning confirmed (first XP drop)")
-                # Idle burst right after burning starts — most natural time to fidget
-                if self.ctx.idle:
-                    self.ctx.idle.maybe_idle()
+                # Activity burst right after burning starts — most natural time to fidget
+                if self.ctx.idle and self.ctx.rng.chance(0.6):
+                    self.ctx.idle.force_burst()
             self._drop_times.append(now)
             self._last_drop_time = now
 
@@ -287,7 +300,16 @@ class BonfireScript(Script):
         else:
             self._find_failures += 1
             if self._find_failures >= 3:
-                self._log("No bank after 3 tries, searching...")
+                # First try zoom-out (bank is usually nearby, just off-screen)
+                self._log("No bank after 3 tries, zooming out...")
+                bank = self.zoom_out_find(BANK_COLOR)
+                if bank:
+                    self._last_target = bank
+                    self._find_failures = 0
+                    self._state = State.CLICK_BANK
+                    return
+                # Zoom didn't help — rotate camera too
+                self._log("Zoom-out failed, searching with camera rotation...")
                 bank = self.search_for_target(BANK_COLOR)
                 if bank:
                     self._last_target = bank
@@ -297,8 +319,7 @@ class BonfireScript(Script):
                 self._find_failures = 0
             self._log("No bank found, waiting...")
             self.ctx.delay.sleep_range(1.5, 3.0)
-            if self.ctx.idle:
-                self.ctx.idle.maybe_idle()
+            # No idle during banking — zoom/scroll can interfere with bank interface
 
     # ── CLICK_BANK ─────────────────────────────────────────────
 
@@ -310,19 +331,45 @@ class BonfireScript(Script):
         x, y = self._last_target.click_point
         self.ctx.input.click(x, y)
 
-        # Wait for character to walk to bank + interface to open (only ~2 tiles)
-        walk_time = self.ctx.rng.truncated_gauss(2.0, 0.4, 1.5, 3.0)
-        self._log(f"Clicked bank, walking over (~{walk_time:.1f}s)")
-        self.ctx.delay.sleep_range(walk_time * 0.9, walk_time * 1.1)
+        # Wait for character to walk to bank + interface to open.
+        # Scale walk time up on successive failures — misclicks may leave us further away.
+        streak = min(self._bank_fail_streak, 5)
+        base_walk = self.ctx.rng.truncated_gauss(2.0, 0.4, 1.5, 3.0)
+        extra = streak * self.ctx.rng.truncated_gauss(1.5, 0.5, 0.8, 2.5)
+        walk_time = base_walk + extra
 
-        if self.ctx.idle and not self.should_stop:
-            self.ctx.idle.maybe_idle()
+        if self._bank_fail_streak > 0:
+            self._log(f"Clicked bank, walking over (max ~{walk_time:.1f}s, +{extra:.1f}s for retry #{self._bank_fail_streak})")
+        else:
+            self._log(f"Clicked bank, walking over (max ~{walk_time:.1f}s)")
+
+        # Poll for bank interface to open instead of blind sleep
+        # No idle during banking — zoom/scroll can scroll inside the bank interface
+        opened = self.wait_for_bank_open(BANK_TEMPLATE, GameRegions.BANK_DEPOSIT_BUTTON, max_wait=walk_time)
+        if opened:
+            self._log("Bank opened")
+        else:
+            self._log("Walk timer expired, checking bank anyway")
 
         self._state = State.WITHDRAW_LOGS
 
     # ── WITHDRAW_LOGS ──────────────────────────────────────────
 
     def _do_withdraw_logs(self) -> None:
+        # Verify bank interface is actually open (if template available)
+        if os.path.exists(BANK_TEMPLATE):
+            bank_open = self.ctx.vision.template_match_region(
+                GameRegions.BANK_DEPOSIT_BUTTON, BANK_TEMPLATE, threshold=0.8,
+            )
+            if not bank_open:
+                self._bank_fail_streak += 1
+                self._log(
+                    f"Bank not visible (streak={self._bank_fail_streak}), "
+                    f"bank click missed — re-finding"
+                )
+                self._state = State.FIND_BANK
+                return
+
         # Click the log slot in the bank interface
         self.click_region_jittered(GameRegions.BANK_LOG_SLOT)
         self.ctx.delay.sleep(NORMAL_ACTION)
@@ -338,6 +385,15 @@ class BonfireScript(Script):
             self.ctx.delay.sleep_range(0.5, 1.0)
             inv_count = self.ctx.vision.count_inventory_items()
 
+        if inv_count == 0:
+            self._bank_fail_streak += 1
+            self._log(f"Withdraw still failed (streak={self._bank_fail_streak}), closing bank and retrying")
+            self.ctx.input.key_tap('esc')
+            self.ctx.delay.sleep(NORMAL_ACTION)
+            self._state = State.FIND_BANK
+            return
+
+        self._bank_fail_streak = 0
         self._bank_trips += 1
         self._log(f"Withdrew logs (inv={inv_count}, trip #{self._bank_trips})")
 

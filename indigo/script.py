@@ -37,6 +37,7 @@ class ScriptConfig:
     """Configuration for a script."""
     name: str
     max_runtime_hours: float = 6.0
+    reserved_slots: int = 0  # slots that won't be deposited (e.g., axe in inventory)
 
 
 @dataclass
@@ -109,6 +110,11 @@ class Script:
             self._log_callback(f"[{self.config.name}] {message}")
         else:
             print(f"[{self.config.name}] {message}")
+
+    @property
+    def inv_full_count(self) -> int:
+        """Number of items when inventory is 'full' (28 minus reserved slots)."""
+        return 28 - self.config.reserved_slots
 
     @property
     def should_stop(self) -> bool:
@@ -364,6 +370,48 @@ class Script:
 
         return None
 
+    def zoom_out_find(self, color: Color, tolerance: int = 15,
+                      min_area: int = 40, max_zoom: int = 25) -> Optional[ColorCluster]:
+        """Zoom out incrementally until a color target becomes visible.
+
+        Simpler than search_for_target — no camera rotation, just zoom.
+        Best for fixed-position objects like banks/deposit boxes.
+
+        Returns the first ColorCluster found, or None.
+        """
+        self._ensure_mouse_in_game_view()
+        total_zoomed = 0
+
+        while total_zoomed < max_zoom and not self.should_stop:
+            ticks = int(self.ctx.rng.truncated_gauss(3, 1, 2, 5))
+            self._ensure_mouse_in_game_view()
+            self.ctx.input.scroll(dy=-ticks)
+            total_zoomed += ticks
+            self.ctx.delay.sleep_range(0.3, 0.6)
+
+            target = self.find_target(color, tolerance=tolerance, min_area=min_area)
+            if target:
+                self._log(f"Found target after zooming out {total_zoomed} ticks")
+                return target
+
+        self._log(f"Target not found after zooming out {total_zoomed} ticks")
+        return None
+
+    def verify_xp_drop(self, timeout: float = 8.0) -> bool:
+        """Wait for an XP drop to confirm an action succeeded.
+
+        Polls check_xp_drop() with randomized intervals up to timeout.
+        Returns True if a drop was seen, False on timeout.
+        """
+        start = time.time()
+        while (time.time() - start) < timeout:
+            if self.should_stop:
+                return True  # don't interfere with shutdown
+            if self.check_xp_drop():
+                return True
+            time.sleep(self.ctx.rng.truncated_gauss(0.4, 0.08, 0.25, 0.55))
+        return False
+
     def search_for_target(self, color: Color, tolerance: int = 15,
                          min_area: int = 40) -> Optional[ColorCluster]:
         """Progressively zoom out and rotate to search for a target color.
@@ -413,10 +461,11 @@ class Script:
 
         self.ctx.delay.sleep_range(0.5, 1.0)
 
-        # Verify inventory is empty, retry once if needed
+        # Verify inventory is empty (accounting for reserved slots like wielded axe)
+        expected = self.config.reserved_slots
         remaining = vision.count_inventory_items()
-        if remaining > 0 and not self.should_stop:
-            self._log(f"Still {remaining} items after deposit, retrying")
+        if remaining > expected and not self.should_stop:
+            self._log(f"Still {remaining} items after deposit (expected {expected}), retrying")
             self.click_region_jittered(GameRegions.DEPOSIT_ALL_BUTTON)
             self.ctx.delay.sleep(NORMAL_ACTION)
             remaining = vision.count_inventory_items()
@@ -427,6 +476,33 @@ class Script:
         self.ctx.delay.sleep(NORMAL_ACTION)
 
         return max(0, before - remaining)
+
+    def wait_for_bank_open(self, template_path: str, region: Region,
+                           max_wait: float, threshold: float = 0.8) -> bool:
+        """Poll for bank/deposit box interface to open via template matching.
+
+        Returns True if detected before max_wait, False if timed out.
+        Adds a small human-like reaction delay after detection.
+        """
+        import os
+        if not os.path.exists(template_path):
+            # No template — fall back to blind sleep
+            self.ctx.delay.sleep_range(max_wait * 0.9, max_wait * 1.1)
+            return True
+
+        start = time.time()
+        while (time.time() - start) < max_wait:
+            if self.should_stop:
+                return True
+            if self.ctx.vision.template_match_region(
+                region, template_path, threshold=threshold,
+            ):
+                # Human reaction delay — don't act instantly when interface opens
+                self.ctx.delay.sleep_range(0.4, 1.2)
+                return True
+            time.sleep(self.ctx.rng.truncated_gauss(0.5, 0.1, 0.3, 0.7))
+
+        return False
 
     def randomize_drop_threshold(self, mean: float = 14, stddev: float = 3,
                                  min_val: float = 10, max_val: float = 20) -> int:
@@ -459,6 +535,22 @@ class Script:
         # Session-varied base speed: some drops faster, some slower
         speed_mult = rng.truncated_gauss(1.0, 0.15, 0.7, 1.4)
 
+        # Build set of slots adjacent to protected slots — suppress misclicks
+        # there to avoid accidentally dropping protected items.
+        # Grid is 4 cols x 7 rows; slot pitch is 42x36px, gap only 6x4px.
+        _near_protected: Set[int] = set()
+        if skip_slots:
+            for s in skip_slots:
+                if s % 4 != 0:
+                    _near_protected.add(s - 1)  # left
+                if s % 4 != 3:
+                    _near_protected.add(s + 1)  # right
+                if s >= 4:
+                    _near_protected.add(s - 4)  # above
+                if s < 24:
+                    _near_protected.add(s + 4)  # below
+            _near_protected -= skip_slots  # don't include the protected slots themselves
+
         dropped = 0
         for slot_idx in order:
             if self.should_stop:
@@ -473,7 +565,8 @@ class Script:
             cx, cy = self.ctx.vision.slot_screen_click_point(slot_idx)
 
             # ~4% chance: misclick (off by some pixels), then correct
-            if rng.chance(0.04):
+            # Suppressed near protected slots to avoid dropping them
+            if slot_idx not in _near_protected and rng.chance(0.04):
                 ox = int(rng.truncated_gauss(0, 12, -20, 20))
                 oy = int(rng.truncated_gauss(0, 12, -20, 20))
                 self.ctx.input.shift_click(cx + ox, cy + oy)

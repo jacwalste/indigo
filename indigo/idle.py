@@ -55,6 +55,11 @@ class IdleBehavior:
         self._last_burst_time = 0.0
         self._min_burst_gap = 20.0  # minimum seconds between bursts
 
+        # AFK break state (set in start_session)
+        self._afk_gap_mean = 25.0   # minutes between breaks
+        self._afk_dur_mean = 90.0   # seconds per break
+        self._next_afk_time = float('inf')  # disabled until start_session
+
     def _log(self, message: str) -> None:
         if self._log_callback:
             self._log_callback(f"[Idle] {message}")
@@ -81,9 +86,16 @@ class IdleBehavior:
         self._afk_max = rng.vary_value(30.0, 0.15)
         self._min_burst_gap = rng.truncated_gauss(25.0, 5.0, 15.0, 40.0)
         self._last_burst_time = time.time()
+
+        # AFK break personality — vary gap and duration per session
+        self._afk_gap_mean = rng.vary_value(25.0, 0.25)   # minutes
+        self._afk_dur_mean = rng.vary_value(90.0, 0.30)    # seconds
+        self._schedule_next_afk()
+
         self._log(
             f"Session: burst_chance={self._burst_chance:.0%}, "
-            f"min_gap={self._min_burst_gap:.0f}s"
+            f"min_gap={self._min_burst_gap:.0f}s, "
+            f"afk_gap~{self._afk_gap_mean:.0f}m, afk_dur~{self._afk_dur_mean:.0f}s"
         )
 
     def maybe_idle(self) -> bool:
@@ -102,11 +114,50 @@ class IdleBehavior:
         self._do_burst()
         return True
 
-    def _do_burst(self) -> None:
-        """Run an attention burst: 2-4 actions chained together."""
+    def force_burst(self) -> None:
+        """Force a small activity burst (e.g., after clicking a target).
+
+        Bypasses cooldown and chance checks. Runs 1-3 actions instead of 2-4.
+        """
+        if self._stopped():
+            return
+        self._do_burst(min_actions=1, max_actions=3)
+
+    def maybe_afk_break(self, max_duration: float = 270.0) -> bool:
+        """Maybe take an AFK break. Returns True if a break was taken.
+
+        max_duration caps the break length (e.g., bonfire goes out after 180s,
+        so pass ~120s to leave buffer for banking/restarting).
+        """
+        if self._stopped():
+            return False
+        if time.time() < self._next_afk_time:
+            return False
+
+        rng = self._ctx.rng
+        upper = min(max_duration, 270.0)  # never exceed 4.5min (logout safety)
+        mean = min(self._afk_dur_mean, upper * 0.6)  # shift mean down if cap is low
+        duration = rng.truncated_gauss(mean, 30.0, 20.0, upper)
+        self._log(f"AFK break ({duration:.0f}s)")
+        self._safe_sleep(duration)
+        self._schedule_next_afk()
+        self._log("Back from AFK")
+        return True
+
+    def _schedule_next_afk(self) -> None:
+        """Schedule the next AFK break."""
+        gap_seconds = self._ctx.rng.truncated_gauss(
+            self._afk_gap_mean * 60, 8 * 60,  # mean, stddev (8 min)
+            10 * 60, 50 * 60,                  # 10-50 min bounds
+        )
+        self._next_afk_time = time.time() + gap_seconds
+
+    def _do_burst(self, min_actions: int = 2, max_actions: int = 4) -> None:
+        """Run an attention burst: min-max actions chained together."""
         rng = self._ctx.rng
 
-        action_count = int(rng.truncated_gauss(2.5, 0.8, 2, 4))
+        mean = (min_actions + max_actions) / 2.0
+        action_count = int(rng.truncated_gauss(mean, 0.8, min_actions, max_actions))
         self._log(f"Attention burst ({action_count} actions)")
 
         names = [n for n, _ in _ACTIONS]
@@ -258,10 +309,6 @@ class IdleBehavior:
             sy += int(rng.truncated_gauss(0, 4, -8, 8))
             inp.move_to(sx, sy)
             self._safe_sleep(rng.truncated_gauss(0.8, 0.3, 0.4, 1.5))
-
-            if rng.chance(0.20) and not self._stopped():
-                inp.click(sx, sy)
-                self._safe_sleep(rng.truncated_gauss(1.2, 0.4, 0.6, 2.0))
 
         self._return_to_inventory()
         self._log(f"Check stats (hovered {hover_count} skills)")

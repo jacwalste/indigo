@@ -636,7 +636,8 @@ def cmd_run_oaks(args):
     ctx.idle = idle
 
     max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
-    script = OaksScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+    axe = args.axe if hasattr(args, "axe") else False
+    script = OaksScript(ctx=ctx, max_hours=max_hours, axe_in_inventory=axe, on_log=_log)
 
     # Wait for backtick to start
     _wait_for_hotkey("\nPress ` (backtick) to start...")
@@ -709,7 +710,8 @@ def cmd_run_willows(args):
     ctx.idle = idle
 
     max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
-    script = WillowsScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+    axe = args.axe if hasattr(args, "axe") else False
+    script = WillowsScript(ctx=ctx, max_hours=max_hours, axe_in_inventory=axe, on_log=_log)
 
     # Wait for backtick to start
     _wait_for_hotkey("\nPress ` (backtick) to start...")
@@ -813,6 +815,79 @@ def cmd_run_rooftop(args):
     print("\nDone.")
 
 
+def cmd_run_salmon(args):
+    """Run salmon/trout fly fishing + cooking script."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.fishing.salmon import SalmonScript
+
+    print("=== Salmon/Trout Fly Fishing ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = SalmonScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
 def cmd_run_bonfire(args):
     """Run bonfire firemaking script (bank for logs)."""
     from .vision import Vision
@@ -858,6 +933,79 @@ def cmd_run_bonfire(args):
 
     max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
     script = BonfireScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_run_stringing(args):
+    """Run bow stringing fletching script (bank for supplies)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.fletching.stringing import StringingScript
+
+    print("=== Bow Stringing (Fletching) ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = StringingScript(ctx=ctx, max_hours=max_hours, on_log=_log)
 
     # Wait for backtick to start
     _wait_for_hotkey("\nPress ` (backtick) to start...")
@@ -1021,6 +1169,160 @@ def cmd_test_bankslot(args):
         print("\n\nDone.")
 
 
+def cmd_test_depositbox(args):
+    """Live deposit box detection test — uses template matching."""
+    import os
+    import cv2
+    from .vision import Vision, GameRegions, Region
+
+    import indigo
+    template_path = os.path.join(
+        os.path.dirname(indigo.__file__), "templates", "deposit_box.png"
+    )
+
+    print("=== Deposit Box Detection Test ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    region = GameRegions.DEPOSIT_ALL_BUTTON
+
+    # --capture mode: grab the button region via mss and save as template
+    if args.capture:
+        print("Open the deposit box, then press Enter to capture the template...")
+        input()
+        frame = vision.grab(region)
+        os.makedirs(os.path.dirname(template_path), exist_ok=True)
+        cv2.imwrite(template_path, frame)
+        print(f"Saved {frame.shape[1]}x{frame.shape[0]} template to {template_path}")
+        vision.close()
+        return
+
+    if not os.path.exists(template_path):
+        print(f"ERROR: Template not found at {template_path}")
+        print("Run with --capture to grab the template via mss:")
+        print("  indigo test depositbox --capture")
+        return
+
+    threshold = args.threshold
+    template = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+    mask = None
+    if len(template.shape) == 3 and template.shape[2] == 4:
+        mask = template[:, :, 3]
+        template = template[:, :, :3]
+    th, tw = template.shape[:2]
+
+    padding = 40
+    grab_region = Region(
+        x=max(0, region.x - padding),
+        y=max(0, region.y - padding),
+        width=region.width + padding * 2,
+        height=region.height + padding * 2,
+    )
+    print(f"Template:  {tw}x{th}")
+    print(f"Region:    ({region.x}, {region.y}) {region.width}x{region.height}")
+    print(f"Grab:      ({grab_region.x}, {grab_region.y}) {grab_region.width}x{grab_region.height}")
+    print(f"Threshold: {threshold}")
+    print("\nWatching... Press Ctrl+C to stop.\n")
+
+    open_count = 0
+    polls = 0
+    try:
+        while True:
+            frame = vision.grab(grab_region)
+            if mask is not None:
+                result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+            else:
+                result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            polls += 1
+
+            if max_val >= threshold:
+                open_count += 1
+                print(f"\r  BANK OPEN    |  score={max_val:.3f}  "
+                      f"open={open_count}  polls={polls}          ")
+            else:
+                print(f"\r  Bank closed  |  score={max_val:.3f}  "
+                      f"open={open_count}  polls={polls}          ", end="")
+
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print(f"\n\nSummary: detected open {open_count} of {polls} polls")
+        vision.close()
+
+
+def cmd_test_bank(args):
+    """Live bank booth detection test — uses same template as deposit box."""
+    import os
+    import cv2
+    from .vision import Vision, GameRegions, Region
+
+    import indigo
+    template_path = os.path.join(
+        os.path.dirname(indigo.__file__), "templates", "deposit_box.png"
+    )
+
+    print("=== Bank Booth Detection Test ===\n")
+
+    if not os.path.exists(template_path):
+        print(f"ERROR: Template not found at {template_path}")
+        print("Run 'indigo test depositbox --capture' first to grab the template.")
+        return
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    region = GameRegions.BANK_DEPOSIT_BUTTON
+    threshold = args.threshold
+
+    template = cv2.imread(template_path, cv2.IMREAD_UNCHANGED)
+    mask = None
+    if len(template.shape) == 3 and template.shape[2] == 4:
+        mask = template[:, :, 3]
+        template = template[:, :, :3]
+    th, tw = template.shape[:2]
+
+    padding = 40
+    grab_region = Region(
+        x=max(0, region.x - padding),
+        y=max(0, region.y - padding),
+        width=region.width + padding * 2,
+        height=region.height + padding * 2,
+    )
+    print(f"Template:  {tw}x{th}")
+    print(f"Region:    ({region.x}, {region.y}) {region.width}x{region.height}")
+    print(f"Grab:      ({grab_region.x}, {grab_region.y}) {grab_region.width}x{grab_region.height}")
+    print(f"Threshold: {threshold}")
+    print("\nWatching... Press Ctrl+C to stop.\n")
+
+    open_count = 0
+    polls = 0
+    try:
+        while True:
+            frame = vision.grab(grab_region)
+            if mask is not None:
+                result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+            else:
+                result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            polls += 1
+
+            if max_val >= threshold:
+                open_count += 1
+                print(f"\r  BANK OPEN    |  score={max_val:.3f}  "
+                      f"open={open_count}  polls={polls}          ")
+            else:
+                print(f"\r  Bank closed  |  score={max_val:.3f}  "
+                      f"open={open_count}  polls={polls}          ", end="")
+
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print(f"\n\nSummary: detected open {open_count} of {polls} polls")
+        vision.close()
+
+
 def cmd_test_fatigue(args):
     """Preview fatigue curves."""
     from .core.fatigue import FatigueManager, FATIGUE_CONFIGS
@@ -1102,6 +1404,15 @@ def main():
     bankslot_parser = test_subparsers.add_parser("bankslot", help="Calibrate bank interface slot coords")
     bankslot_parser.set_defaults(func=cmd_test_bankslot)
 
+    depositbox_parser = test_subparsers.add_parser("depositbox", help="Live deposit box open/closed detection")
+    depositbox_parser.add_argument("--threshold", type=float, default=0.8, help="Match threshold (0.0-1.0)")
+    depositbox_parser.add_argument("--capture", action="store_true", help="Capture template from screen via mss")
+    depositbox_parser.set_defaults(func=cmd_test_depositbox)
+
+    bank_parser = test_subparsers.add_parser("bank", help="Live bank booth open/closed detection")
+    bank_parser.add_argument("--threshold", type=float, default=0.8, help="Match threshold (0.0-1.0)")
+    bank_parser.set_defaults(func=cmd_test_bank)
+
     # run
     run_parser = subparsers.add_parser("run", help="Run a bot script")
     run_subparsers = run_parser.add_subparsers(dest="run_command")
@@ -1117,19 +1428,29 @@ def main():
 
     oaks_parser = run_subparsers.add_parser("oaks", help="Chop oak trees (bank via deposit box)")
     oaks_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    oaks_parser.add_argument("--axe", action="store_true", help="Axe in inventory (lock slot 0, deposits expect 1 item remaining)")
     oaks_parser.set_defaults(func=cmd_run_oaks)
 
     willows_parser = run_subparsers.add_parser("willows", help="Chop willow trees (bank via deposit box)")
     willows_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    willows_parser.add_argument("--axe", action="store_true", help="Axe in inventory (lock slot 0, deposits expect 1 item remaining)")
     willows_parser.set_defaults(func=cmd_run_willows)
 
     rooftop_parser = run_subparsers.add_parser("rooftop", help="Run rooftop agility course")
     rooftop_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     rooftop_parser.set_defaults(func=cmd_run_rooftop)
 
+    salmon_parser = run_subparsers.add_parser("salmon", help="Fly fish salmon/trout, cook on fire, drop")
+    salmon_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    salmon_parser.set_defaults(func=cmd_run_salmon)
+
     bonfire_parser = run_subparsers.add_parser("bonfire", help="Burn logs at a bonfire (bank for more)")
     bonfire_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     bonfire_parser.set_defaults(func=cmd_run_bonfire)
+
+    stringing_parser = run_subparsers.add_parser("stringing", help="String bows at bank (fletching)")
+    stringing_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    stringing_parser.set_defaults(func=cmd_run_stringing)
 
     args = parser.parse_args()
 
