@@ -888,6 +888,79 @@ def cmd_run_salmon(args):
     print("\nDone.")
 
 
+def cmd_run_barbarian(args):
+    """Run barbarian fishing script (drop all)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.fishing.barbarian import BarbarianScript
+
+    print("=== Barbarian Fishing ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    script = BarbarianScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
 def cmd_run_bonfire(args):
     """Run bonfire firemaking script (bank for logs)."""
     from .vision import Vision
@@ -1443,6 +1516,10 @@ def main():
     salmon_parser = run_subparsers.add_parser("salmon", help="Fly fish salmon/trout, cook on fire, drop")
     salmon_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     salmon_parser.set_defaults(func=cmd_run_salmon)
+
+    barbarian_parser = run_subparsers.add_parser("barbarian", help="Barbarian fish and drop (Otto's Grotto)")
+    barbarian_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    barbarian_parser.set_defaults(func=cmd_run_barbarian)
 
     bonfire_parser = run_subparsers.add_parser("bonfire", help="Burn logs at a bonfire (bank for more)")
     bonfire_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")

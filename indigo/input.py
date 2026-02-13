@@ -188,6 +188,16 @@ class Input:
         time.sleep(post_delay)
         self._keyboard.release(Key.shift)
 
+    def shift_down(self) -> None:
+        """Press and hold shift."""
+        self._ensure_controllers()
+        self._keyboard.press(Key.shift)
+
+    def shift_up(self) -> None:
+        """Release shift."""
+        self._ensure_controllers()
+        self._keyboard.release(Key.shift)
+
     def key_tap(self, key: str, hold: Optional[float] = None) -> None:
         """Press and release a key with human-like hold duration.
 

@@ -279,6 +279,11 @@ class StringingScript(Script):
             self.ctx.delay.sleep(NORMAL_ACTION)
 
         self._find_failures = 0
+
+        # Might pause after banking before starting — "got supplies, zones out"
+        if self.ctx.idle:
+            self.ctx.idle.maybe_afk_break(max_duration=90.0)
+
         self._state = State.USE_ITEM
 
     # ── USE_ITEM ───────────────────────────────────────────────
@@ -392,6 +397,9 @@ class StringingScript(Script):
             reaction = self.ctx.rng.truncated_gauss(3.0, 2.5, 0.5, 12.0)
             self._log(f"Reacting in {reaction:.1f}s")
             self.ctx.delay.sleep_range(reaction * 0.9, reaction * 1.1)
+            # Might zone out after finishing — "done, not paying attention"
+            if self.ctx.idle:
+                self.ctx.idle.maybe_afk_break(max_duration=120.0)
             self._state = State.FIND_BANK
             return
 

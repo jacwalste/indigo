@@ -364,9 +364,10 @@ class SalmonScript(Script):
         if done:
             if self._cook_pass == 0:
                 # First fish type done — cook the second type
+                # Re-find fire (camera may have rotated during idle)
                 self._cook_pass = 1
                 self._log("First fish type done, cooking second type")
-                self._state = State.CLICK_FIRE
+                self._state = State.FIND_FIRE
             else:
                 # Both types cooked — drop everything
                 self._state = State.DROPPING
