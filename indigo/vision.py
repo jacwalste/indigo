@@ -14,6 +14,7 @@ from typing import Optional, Callable, List, Tuple
 
 import cv2
 import mss
+import threading
 import numpy as np
 
 # macOS standard title bar height (content starts below this)
@@ -161,7 +162,14 @@ class Vision:
     ):
         self._game_origin = game_origin
         self._log_callback = on_log
-        self._sct = mss.mss()
+        self._sct_local = threading.local()
+
+    @property
+    def _sct(self):
+        """Get thread-local mss instance (X11 requires per-thread connections)."""
+        if not hasattr(self._sct_local, 'instance'):
+            self._sct_local.instance = mss.mss()
+        return self._sct_local.instance
 
     def _log(self, message: str) -> None:
         if self._log_callback:
@@ -435,7 +443,8 @@ class Vision:
 
     def close(self) -> None:
         """Cleanup mss."""
-        self._sct.close()
+        if hasattr(self._sct_local, 'instance'):
+            self._sct_local.instance.close()
 
     def get_status(self) -> dict:
         return {"active": True, "game_origin": self._game_origin}
