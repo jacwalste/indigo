@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -55,6 +56,17 @@ def _hotkey_stop_listener(stop_callback: Callable[[], None]) -> threading.Thread
     listener.daemon = True
     listener.start()
     return listener
+
+
+def _try_load_replay(script_name: str):
+    """Try to load a ReplayGenerator for a script. Returns None if no library exists."""
+    from .core.replay import load_library, ReplayGenerator
+    library = load_library(script_name)
+    if library and library.template_count > 0:
+        replay = ReplayGenerator(library, on_log=_log)
+        _log(f"Using replay paths ({library.template_count} templates) for '{script_name}'")
+        return replay
+    return None
 
 
 def cmd_launch(args):
@@ -437,14 +449,18 @@ def cmd_run_shrimp(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("shrimp")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -510,14 +526,18 @@ def cmd_run_trees(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("trees")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -574,21 +594,40 @@ def cmd_test_coords(args):
     gx, gy = game_origin
 
     print(f"Game origin: ({gx}, {gy})")
-    print("Move your mouse. Press Ctrl+C to stop.\n")
+    print("Move your mouse. Press ` to pin a line. Ctrl+C to stop.\n")
     print(f"  {'Screen':>16}  {'Game-Relative':>16}")
     print(f"  {'------':>16}  {'-------------':>16}")
 
     from pynput.mouse import Controller as MouseController
+    from pynput.keyboard import Listener as KBListener, KeyCode
     mouse = MouseController()
+
+    pinned = threading.Event()
+
+    def on_press(key):
+        if key == KeyCode.from_char('`'):
+            pinned.set()
+
+    kb_listener = KBListener(on_press=on_press)
+    kb_listener.daemon = True
+    kb_listener.start()
 
     try:
         while True:
             pos = mouse.position
             sx, sy = int(pos[0]), int(pos[1])
             rx, ry = sx - gx, sy - gy
-            print(f"  ({sx:4d}, {sy:4d})    ({rx:4d}, {ry:4d})    ", end="\r")
+            line = f"  ({sx:4d}, {sy:4d})    ({rx:4d}, {ry:4d})"
+
+            if pinned.is_set():
+                pinned.clear()
+                print(f"{line}    <-- pinned")
+            else:
+                print(f"{line}    ", end="\r")
+
             time.sleep(0.05)
     except KeyboardInterrupt:
+        kb_listener.stop()
         print("\n\nDone.")
 
 
@@ -613,14 +652,18 @@ def cmd_run_oaks(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("oaks")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -666,6 +709,77 @@ def cmd_run_oaks(args):
     print("\nDone.")
 
 
+def cmd_run_yews(args):
+    """Run yew trees woodcutting script (banking via deposit box)."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.woodcutting.yews import YewsScript
+
+    print("=== Yew Trees (Deposit Box Banking) ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    replay = _try_load_replay("yews")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
+
+    delay.start_session()
+    windmouse.start_session()
+    if replay:
+        replay.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    axe = args.axe if hasattr(args, "axe") else False
+    script = YewsScript(ctx=ctx, max_hours=max_hours, axe_in_inventory=axe, on_log=_log)
+
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
 def cmd_run_willows(args):
     """Run willow trees woodcutting script (banking via deposit box)."""
     from .vision import Vision
@@ -687,14 +801,18 @@ def cmd_run_willows(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("willows")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -761,14 +879,18 @@ def cmd_run_rooftop(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("rooftop")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -836,14 +958,18 @@ def cmd_run_salmon(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("salmon")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -909,14 +1035,18 @@ def cmd_run_barbarian(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("barbarian")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -982,14 +1112,18 @@ def cmd_run_bonfire(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("bonfire")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -1055,14 +1189,18 @@ def cmd_run_stringing(args):
     delay = Delay(seed=rng.seed, on_log=_log)
     windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
     vision = Vision(game_origin=game_origin, on_log=_log)
-    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log)
+    replay = _try_load_replay("stringing")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
 
     # Start sessions
     delay.start_session()
     windmouse.start_session()
+    if replay:
+        replay.start_session()
     inp.start_session()
 
     stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
     ctx = ScriptContext(
         vision=vision,
         input=inp,
@@ -1079,6 +1217,84 @@ def cmd_run_stringing(args):
 
     max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
     script = StringingScript(ctx=ctx, max_hours=max_hours, on_log=_log)
+
+    # Wait for backtick to start
+    _wait_for_hotkey("\nPress ` (backtick) to start...")
+    print()
+
+    script.start()
+
+    # Backtick again or Ctrl+C to stop
+    f12_listener = _hotkey_stop_listener(lambda: script.stop())
+    print(f"Running (max {max_hours}h). Press ` or Ctrl+C to stop.\n")
+
+    try:
+        script.wait()
+    except KeyboardInterrupt:
+        print("\nStopping...")
+        script.stop()
+        script.wait(timeout=5)
+
+    # Cleanup
+    if f12_listener.is_alive():
+        f12_listener.stop()
+    inp.stop_session()
+    windmouse.stop_session()
+    delay.stop_session()
+    vision.close()
+    print("\nDone.")
+
+
+def cmd_run_wintertodt(args):
+    """Run Wintertodt minigame script."""
+    from .vision import Vision
+    from .input import Input
+    from .core.delay import Delay
+    from .core.windmouse import WindMouse
+    from .core.rng import RNG
+    from .script import ScriptContext
+    from scripts.wintertodt.wintertodt import WintertodtScript
+
+    print("=== Wintertodt ===\n")
+
+    # Detect game origin and verify window size
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+
+    # Build context
+    rng = RNG()
+    delay = Delay(seed=rng.seed, on_log=_log)
+    windmouse = WindMouse(seed=rng.seed + 1, on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+    replay = _try_load_replay("wintertodt")
+    inp = Input(delay=delay, windmouse=windmouse, seed=rng.seed + 2, on_log=_log, replay=replay)
+
+    # Start sessions
+    delay.start_session()
+    windmouse.start_session()
+    if replay:
+        replay.start_session()
+    inp.start_session()
+
+    stop_flag = threading.Event()
+    delay.set_stop_flag(stop_flag)
+    ctx = ScriptContext(
+        vision=vision,
+        input=inp,
+        delay=delay,
+        rng=rng,
+        stop_flag=stop_flag,
+    )
+
+    # Set up idle behaviors
+    from .idle import IdleBehavior
+    idle = IdleBehavior(ctx=ctx, on_log=_log)
+    idle.start_session()
+    ctx.idle = idle
+
+    max_hours = args.max_hours if hasattr(args, "max_hours") else 6.0
+    fletch = not (args.no_fletch if hasattr(args, "no_fletch") else False)
+    script = WintertodtScript(ctx=ctx, max_hours=max_hours, fletch=fletch, on_log=_log)
 
     # Wait for backtick to start
     _wait_for_hotkey("\nPress ` (backtick) to start...")
@@ -1209,6 +1425,148 @@ def cmd_test_xpdrop(args):
         print(f"\n\nSummary: {detections} detections in {polls} polls")
         if polls > 0:
             print(f"Detection rate: {detections/polls*100:.1f}%")
+        vision.close()
+
+
+def cmd_test_warmth(args):
+    """Live Wintertodt warmth bar monitor — scans orange fill percentage."""
+    import cv2
+    import numpy as np
+    from .vision import Vision, Region, Color
+
+    print("=== Wintertodt Warmth Monitor ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    # Warmth bar region (game-relative)
+    bar_region = Region(7, 30, 198, 13)
+    orange = Color.from_hex("ff5300")
+    tolerance = args.tolerance
+
+    print(f"Bar region:  ({bar_region.x}, {bar_region.y}) {bar_region.width}x{bar_region.height}")
+    print(f"Orange:      #{orange.r:02x}{orange.g:02x}{orange.b:02x} (tol={tolerance})")
+    print("\nWatching warmth... Press Ctrl+C to stop.\n")
+
+    bgr = np.array(orange.to_bgr(), dtype=np.uint8)
+    lower = np.clip(bgr.astype(np.int16) - tolerance, 0, 255).astype(np.uint8)
+    upper = np.clip(bgr.astype(np.int16) + tolerance, 0, 255).astype(np.uint8)
+
+    try:
+        while True:
+            frame = vision.grab(bar_region)
+            mask = cv2.inRange(frame, lower, upper)
+
+            # Count orange pixels per column to find rightmost filled column
+            col_counts = np.sum(mask > 0, axis=0)  # shape: (width,)
+            min_col_pixels = 3  # need at least 3 orange pixels in a column
+
+            # Find rightmost column with enough orange
+            filled_cols = np.where(col_counts >= min_col_pixels)[0]
+            if len(filled_cols) > 0:
+                rightmost = int(filled_cols[-1]) + 1
+                warmth_pct = rightmost / bar_region.width * 100
+            else:
+                warmth_pct = 0.0
+                rightmost = 0
+
+            # Visual bar
+            bar_len = 30
+            filled = int(warmth_pct / 100 * bar_len)
+            bar_str = "█" * filled + "░" * (bar_len - filled)
+
+            print(f"\r  {bar_str}  {warmth_pct:5.1f}%  "
+                  f"(fill={rightmost}/{bar_region.width}px)    ", end="")
+
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n\nDone.")
+        vision.close()
+
+
+def cmd_test_wt_energy(args):
+    """Live Wintertodt energy bar monitor — scans green fill percentage."""
+    import cv2
+    import numpy as np
+    from .vision import Vision, Region, Color
+
+    print("=== Wintertodt Energy Monitor ===\n")
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    # Energy bar region (game-relative) — below the warmth bar
+    bar_region = Region(8, args.bar_y, 197, 11)
+    green = Color.from_hex("00d000")
+    red = Color.from_hex("df0000")
+    tolerance = args.tolerance
+
+    print(f"Bar region:  ({bar_region.x}, {bar_region.y}) {bar_region.width}x{bar_region.height}")
+    print(f"Green:       #{green.r:02x}{green.g:02x}{green.b:02x} (tol={tolerance})")
+    print(f"Red:         #{red.r:02x}{red.g:02x}{red.b:02x}")
+    print("\nWatching energy... Press Ctrl+C to stop.\n")
+
+    green_bgr = np.array(green.to_bgr(), dtype=np.uint8)
+    green_lower = np.clip(green_bgr.astype(np.int16) - tolerance, 0, 255).astype(np.uint8)
+    green_upper = np.clip(green_bgr.astype(np.int16) + tolerance, 0, 255).astype(np.uint8)
+
+    red_bgr = np.array(red.to_bgr(), dtype=np.uint8)
+    red_lower = np.clip(red_bgr.astype(np.int16) - tolerance, 0, 255).astype(np.uint8)
+    red_upper = np.clip(red_bgr.astype(np.int16) + tolerance, 0, 255).astype(np.uint8)
+
+    try:
+        while True:
+            frame = vision.grab(bar_region)
+
+            # Count green pixels per column
+            green_mask = cv2.inRange(frame, green_lower, green_upper)
+            green_cols = np.sum(green_mask > 0, axis=0)
+
+            # Count red pixels per column
+            red_mask = cv2.inRange(frame, red_lower, red_upper)
+            red_cols = np.sum(red_mask > 0, axis=0)
+
+            min_col_pixels = 3
+
+            # Green fill = rightmost column with green
+            green_filled = np.where(green_cols >= min_col_pixels)[0]
+            # Red fill = leftmost column with red
+            red_filled = np.where(red_cols >= min_col_pixels)[0]
+
+            if len(green_filled) > 0:
+                green_rightmost = int(green_filled[-1]) + 1
+                energy_pct = green_rightmost / bar_region.width * 100
+            elif len(red_filled) > 0:
+                # All red = 0%
+                energy_pct = 0.0
+                green_rightmost = 0
+            else:
+                # Neither detected — bar might not be visible
+                energy_pct = -1
+                green_rightmost = 0
+
+            # Totals for debug
+            total_green = int(np.sum(green_mask > 0))
+            total_red = int(np.sum(red_mask > 0))
+
+            # Visual bar (green portion then red)
+            bar_len = 30
+            if energy_pct >= 0:
+                g_len = int(energy_pct / 100 * bar_len)
+                r_len = bar_len - g_len
+                bar_str = "█" * g_len + "░" * r_len
+                print(f"\r  {bar_str}  {energy_pct:5.1f}%  "
+                      f"(green={green_rightmost}px  "
+                      f"gpx={total_green} rpx={total_red})    ", end="")
+            else:
+                print(f"\r  {'?'*bar_len}  NO BAR  "
+                      f"(gpx={total_green} rpx={total_red})    ", end="")
+
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        print("\n\nDone.")
         vision.close()
 
 
@@ -1396,6 +1754,124 @@ def cmd_test_bank(args):
         vision.close()
 
 
+def cmd_test_capture_log(args):
+    """Capture bruma log icon from an inventory slot as a template."""
+    import os
+    import cv2
+    from .vision import Vision, GameRegions
+
+    import indigo
+    template_path = os.path.join(
+        os.path.dirname(indigo.__file__), "templates", "bruma_log.png"
+    )
+
+    slot = args.slot
+    if slot < 0 or slot > 27:
+        print("ERROR: Slot must be 0-27")
+        return
+
+    print("=== Capture Bruma Log Template ===\n")
+    print(f"Slot: {slot}")
+    print(f"Template will be saved to: {template_path}\n")
+    print("Make sure the slot contains a bruma log, then press Enter...")
+    input()
+
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    Vision.verify_window_size(on_log=_log)
+    vision = Vision(game_origin=game_origin, on_log=_log)
+
+    slot_region = GameRegions.get_inventory_slot(slot)
+    frame = vision.grab(slot_region)
+    vision.close()
+
+    os.makedirs(os.path.dirname(template_path), exist_ok=True)
+    cv2.imwrite(template_path, frame)
+    print(f"Saved {frame.shape[1]}x{frame.shape[0]} template to {template_path}")
+    print("\nDone. You can now run `indigo run wintertodt`.")
+
+
+def cmd_record(args):
+    """Record mouse data for an activity."""
+    from .core.recorder import Recorder
+    from .core.replay import build_library, save_library, load_library
+
+    # --list mode
+    if args.list:
+        recordings = Recorder.list_recordings()
+        if not recordings:
+            print("No recordings found.")
+            return
+        print("=== Available Recordings ===\n")
+        for script, files in sorted(recordings.items()):
+            lib = load_library(script)
+            lib_info = f"  library: {lib.template_count} templates" if lib else "  no library"
+            print(f"  {script}: {len(files)} raw recording(s){lib_info}")
+            for f in files:
+                print(f"    {os.path.basename(f)}")
+        return
+
+    script_name = args.script_name
+    if not script_name:
+        print("ERROR: Specify a script name, e.g. 'indigo record shrimp'")
+        sys.exit(1)
+
+    # --process mode: just rebuild library from existing raws
+    if args.process:
+        print(f"=== Reprocessing '{script_name}' ===\n")
+        library = build_library(script_name, on_log=_log)
+        if library:
+            path = save_library(library)
+            print(f"\nLibrary saved: {path}")
+            print(f"  Templates: {library.template_count}")
+            for bin_name, templates in library.templates.items():
+                print(f"    {bin_name}: {len(templates)}")
+        else:
+            print("No templates could be extracted.")
+        return
+
+    # Normal record mode
+    print(f"=== Recording: {script_name} ===\n")
+
+    from .vision import Vision
+    game_origin = Vision.detect_game_origin(on_log=_log)
+    print(f"Game origin: {game_origin}\n")
+
+    recorder = Recorder(script_name, game_origin, on_log=_log)
+
+    print("Play the activity normally.")
+    print("Press ` (backtick) to START recording.")
+    print("Press ` again to STOP.\n")
+
+    # Wait for backtick to start
+    _wait_for_hotkey("Press ` to start recording...")
+    print()
+    recorder.start()
+    print("Recording... Press ` to stop.\n")
+
+    # Wait for backtick to stop
+    _wait_for_hotkey("Press ` to stop recording...")
+    print()
+
+    recording = recorder.stop()
+    print(f"\nRecorded {len(recording.events)} events in {recording.duration:.1f}s")
+
+    # Save raw
+    raw_path = recorder.save(recording)
+    print(f"Raw saved: {raw_path}")
+
+    # Process into library
+    print("\nProcessing into library...")
+    library = build_library(script_name, on_log=_log)
+    if library:
+        lib_path = save_library(library)
+        print(f"Library saved: {lib_path}")
+        print(f"  Templates: {library.template_count}")
+        for bin_name, templates in library.templates.items():
+            print(f"    {bin_name}: {len(templates)}")
+    else:
+        print("No templates could be extracted from the recording.")
+
+
 def cmd_test_fatigue(args):
     """Preview fatigue curves."""
     from .core.fatigue import FatigueManager, FATIGUE_CONFIGS
@@ -1442,6 +1918,13 @@ def main():
     status_parser = subparsers.add_parser("status", help="Show VPN and RuneLite status")
     status_parser.set_defaults(func=cmd_status)
 
+    # record
+    record_parser = subparsers.add_parser("record", help="Record mouse data for replay")
+    record_parser.add_argument("script_name", nargs="?", default=None, help="Script name (e.g. shrimp)")
+    record_parser.add_argument("--list", action="store_true", help="List available recordings")
+    record_parser.add_argument("--process", action="store_true", help="Reprocess raw recordings into library")
+    record_parser.set_defaults(func=cmd_record)
+
     # test
     test_parser = subparsers.add_parser("test", help="Run test harnesses")
     test_subparsers = test_parser.add_subparsers(dest="test_command")
@@ -1474,6 +1957,15 @@ def main():
     xpdrop_parser = test_subparsers.add_parser("xpdrop", help="Live XP drop detection test")
     xpdrop_parser.set_defaults(func=cmd_test_xpdrop)
 
+    warmth_parser = test_subparsers.add_parser("warmth", help="Live Wintertodt warmth bar monitor")
+    warmth_parser.add_argument("--tolerance", type=int, default=30, help="BGR color tolerance (default 30)")
+    warmth_parser.set_defaults(func=cmd_test_warmth)
+
+    wt_energy_parser = test_subparsers.add_parser("wt-energy", help="Live Wintertodt energy bar monitor")
+    wt_energy_parser.add_argument("--tolerance", type=int, default=30, help="BGR color tolerance (default 30)")
+    wt_energy_parser.add_argument("--bar-y", type=int, default=46, help="Game-relative Y of energy bar top (default 46)")
+    wt_energy_parser.set_defaults(func=cmd_test_wt_energy)
+
     bankslot_parser = test_subparsers.add_parser("bankslot", help="Calibrate bank interface slot coords")
     bankslot_parser.set_defaults(func=cmd_test_bankslot)
 
@@ -1485,6 +1977,10 @@ def main():
     bank_parser = test_subparsers.add_parser("bank", help="Live bank booth open/closed detection")
     bank_parser.add_argument("--threshold", type=float, default=0.8, help="Match threshold (0.0-1.0)")
     bank_parser.set_defaults(func=cmd_test_bank)
+
+    capture_log_parser = test_subparsers.add_parser("capture-log", help="Capture bruma log template from inventory")
+    capture_log_parser.add_argument("--slot", type=int, default=1, help="Inventory slot containing a bruma log (default: 1)")
+    capture_log_parser.set_defaults(func=cmd_test_capture_log)
 
     # run
     run_parser = subparsers.add_parser("run", help="Run a bot script")
@@ -1503,6 +1999,11 @@ def main():
     oaks_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     oaks_parser.add_argument("--axe", action="store_true", help="Axe in inventory (lock slot 0, deposits expect 1 item remaining)")
     oaks_parser.set_defaults(func=cmd_run_oaks)
+
+    yews_parser = run_subparsers.add_parser("yews", help="Chop yew trees (bank via deposit box)")
+    yews_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    yews_parser.add_argument("--axe", action="store_true", help="Axe in inventory (lock slot 0, deposits expect 1 item remaining)")
+    yews_parser.set_defaults(func=cmd_run_yews)
 
     willows_parser = run_subparsers.add_parser("willows", help="Chop willow trees (bank via deposit box)")
     willows_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
@@ -1529,6 +2030,11 @@ def main():
     stringing_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
     stringing_parser.set_defaults(func=cmd_run_stringing)
 
+    wintertodt_parser = run_subparsers.add_parser("wintertodt", help="Run Wintertodt minigame")
+    wintertodt_parser.add_argument("--max-hours", type=float, default=6.0, help="Max runtime in hours")
+    wintertodt_parser.add_argument("--no-fletch", action="store_true", help="Skip fletching, feed raw logs (more active, fewer points per log)")
+    wintertodt_parser.set_defaults(func=cmd_run_wintertodt)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1544,7 +2050,7 @@ def main():
         sys.exit(0)
 
     # Handle Ctrl+C - only install for commands that don't handle it themselves
-    if args.command not in ("launch", "run"):
+    if args.command not in ("launch", "run", "record"):
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
     args.func(args)

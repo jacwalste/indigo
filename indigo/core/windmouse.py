@@ -67,6 +67,8 @@ class Path:
     end: Point
     stats: PathStats
     config: WindMouseConfig
+    timings: Optional[List[float]] = None  # normalized [0..1] per point
+    duration: Optional[float] = None       # suggested total duration in seconds
 
     def get_points_as_tuples(self) -> List[Tuple[float, float]]:
         return [p.as_tuple() for p in self.points]

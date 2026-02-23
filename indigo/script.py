@@ -17,7 +17,7 @@ from .vision import Vision, Color, ColorCluster, GameRegions, Region
 from .input import Input
 from .core.delay import Delay
 from .core.rng import RNG
-from .core.timing import FAST_ACTION, NORMAL_ACTION, CAREFUL_ACTION
+from .core.timing import NORMAL_ACTION
 
 # XP drop detection defaults — configure RuneLite XP Drop plugin to magenta (FF00FF).
 # Region calibrated for Fixed Mode: drops appear at x≈505, float from y≈160 up to y≈50.
@@ -135,6 +135,30 @@ class Script:
         secs = int(elapsed % 60)
         return f"{mins}m{secs:02d}s"
 
+    def cancel_selection(self) -> None:
+        """Cancel any active 'Use X ->' item selection by tab-switching.
+
+        Clicks a nearby tab then back to inventory. Tab switches reliably
+        clear the selection cursor in OSRS. Safe to call when nothing is
+        selected — just a brief visual tab flicker.
+        """
+        rng = self.ctx.rng
+        inp = self.ctx.input
+        vision = self.ctx.vision
+
+        # Click a neighbor tab (equipment or stats — adjacent to inventory)
+        away_tab = rng.choice([GameRegions.TAB_EQUIPMENT, GameRegions.TAB_STATS])
+        tx, ty = vision.to_screen(*away_tab.center)
+        inp.click(tx + int(rng.truncated_gauss(0, 3, -6, 6)),
+                  ty + int(rng.truncated_gauss(0, 3, -6, 6)))
+        self.ctx.delay.sleep_range(0.08, 0.20)
+
+        # Click back to inventory
+        tx, ty = vision.to_screen(*GameRegions.TAB_INVENTORY.center)
+        inp.click(tx + int(rng.truncated_gauss(0, 3, -6, 6)),
+                  ty + int(rng.truncated_gauss(0, 3, -6, 6)))
+        self.ctx.delay.sleep_range(0.08, 0.20)
+
     def click_target(self, x: int, y: int) -> None:
         """Click a game object with occasional human-like multi-clicks.
 
@@ -242,10 +266,14 @@ class Script:
         self.ctx.input.move_to(target_x, target_y)
 
     def _rotate_camera_search(self, key: str, check_fn: Callable):
-        """Rotate camera with varied human-like styles, checking periodically.
+        """Rotate camera with varied human-like styles, scanning continuously.
 
         Picks a rotation style randomly each invocation to avoid predictable
         burst-pause-burst patterns. Each style covers roughly one full rotation.
+
+        Long holds are broken into short sub-holds (~0.3s) with vision checks
+        between each, so targets are detected mid-rotation instead of only
+        after each full rotation step.
 
         Returns whatever check_fn returns when truthy, or None.
         """
@@ -258,64 +286,62 @@ class Script:
         )
         self._log(f"Search rotation: {style}")
 
+        # Session-varied scan interval — how often we check mid-rotation
+        scan_interval = rng.truncated_gauss(0.30, 0.05, 0.20, 0.40)
+
+        # Build (hold_duration, pause_after) segments per style
+        segments = []
         if style == 'fluid':
-            # Long smooth holds — casually spinning the camera
             steps = int(rng.truncated_gauss(4, 1, 3, 6))
-            for step in range(steps):
-                if self.should_stop:
-                    return None
+            for _ in range(steps):
                 hold = rng.truncated_gauss(2.0, 0.7, 1.0, 4.0)
-                inp.key_hold(key, hold)
-                self.ctx.delay.sleep_range(0.08, 0.25)
-                result = check_fn()
-                if result:
-                    self._log(f"Found after {step + 1} rotations ({style})")
-                    return result
+                pause = rng.truncated_gauss(0.15, 0.05, 0.08, 0.25)
+                segments.append((hold, pause))
 
         elif style == 'burst':
-            # Short holds with pauses — checking feel
             steps = int(rng.truncated_gauss(8, 2, 5, 12))
-            for step in range(steps):
-                if self.should_stop:
-                    return None
+            for _ in range(steps):
                 hold = rng.truncated_gauss(0.5, 0.2, 0.2, 1.0)
-                inp.key_hold(key, hold)
                 pause = rng.truncated_gauss(0.35, 0.15, 0.1, 0.7)
-                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
-                result = check_fn()
-                if result:
-                    self._log(f"Found after {step + 1} rotations ({style})")
-                    return result
+                segments.append((hold, pause))
 
         elif style == 'sweep':
-            # Medium varied holds — deliberate sweeping
             steps = int(rng.truncated_gauss(6, 1.5, 4, 9))
-            for step in range(steps):
-                if self.should_stop:
-                    return None
+            for _ in range(steps):
                 hold = rng.truncated_gauss(1.2, 0.5, 0.4, 2.5)
-                inp.key_hold(key, hold)
                 pause = rng.truncated_gauss(0.2, 0.1, 0.05, 0.5)
-                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
-                result = check_fn()
-                if result:
-                    self._log(f"Found after {step + 1} rotations ({style})")
-                    return result
+                segments.append((hold, pause))
 
         elif style == 'tap':
-            # Quick taps with longer pauses — careful searching
             steps = int(rng.truncated_gauss(12, 3, 8, 18))
-            for step in range(steps):
-                if self.should_stop:
-                    return None
+            for _ in range(steps):
                 hold = rng.truncated_gauss(0.18, 0.06, 0.08, 0.35)
-                inp.key_hold(key, hold)
                 pause = rng.truncated_gauss(0.5, 0.2, 0.2, 1.0)
-                self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
-                result = check_fn()
-                if result:
-                    self._log(f"Found after {step + 1} rotations ({style})")
-                    return result
+                segments.append((hold, pause))
+
+        for step, (hold, pause) in enumerate(segments):
+            if self.should_stop:
+                return None
+
+            # Break hold into sub-steps, scanning between each
+            remaining = hold
+            while remaining > 0:
+                sub = min(remaining, scan_interval)
+                inp.key_hold(key, sub)
+                remaining -= sub
+
+                if remaining > 0:
+                    result = check_fn()
+                    if result:
+                        self._log(f"Found mid-rotation step {step + 1} ({style})")
+                        return result
+
+            # Post-hold pause + check
+            self.ctx.delay.sleep_range(pause * 0.9, pause * 1.1)
+            result = check_fn()
+            if result:
+                self._log(f"Found after {step + 1} rotations ({style})")
+                return result
 
         return None
 
@@ -443,6 +469,23 @@ class Script:
         sx, sy = self.ctx.vision.to_screen(cx + jx, cy + jy)
         self.ctx.input.click(sx, sy)
 
+    def tap_region_jittered(self, region: "GameRegions") -> None:
+        """Tap a random point within a Region — minimal hold to avoid drag.
+
+        Same targeting as click_region_jittered but uses Input.tap() for
+        near-instant press+release. Use for bank/deposit interface buttons
+        where hold + mouse drift causes OSRS to interpret clicks as drags.
+        """
+        rng = self.ctx.rng
+        cx, cy = region.center
+        margin = 1
+        jx = int(rng.truncated_gauss(0, region.width * 0.25,
+                                      -(region.width // 2 - margin), region.width // 2 - margin))
+        jy = int(rng.truncated_gauss(0, region.height * 0.25,
+                                      -(region.height // 2 - margin), region.height // 2 - margin))
+        sx, sy = self.ctx.vision.to_screen(cx + jx, cy + jy)
+        self.ctx.input.tap(sx, sy)
+
     def deposit_all(self) -> int:
         """Click Deposit All in an open deposit box, verify, close.
 
@@ -452,8 +495,8 @@ class Script:
         vision = self.ctx.vision
         before = vision.count_inventory_items()
 
-        # Click Deposit All button
-        self.click_region_jittered(GameRegions.DEPOSIT_ALL_BUTTON)
+        # Click Deposit All button — tap to avoid drag-scroll in deposit interface
+        self.tap_region_jittered(GameRegions.DEPOSIT_ALL_BUTTON)
         self.ctx.delay.sleep(NORMAL_ACTION)
 
         if self.should_stop:
@@ -466,7 +509,7 @@ class Script:
         remaining = vision.count_inventory_items()
         if remaining > expected and not self.should_stop:
             self._log(f"Still {remaining} items after deposit (expected {expected}), retrying")
-            self.click_region_jittered(GameRegions.DEPOSIT_ALL_BUTTON)
+            self.tap_region_jittered(GameRegions.DEPOSIT_ALL_BUTTON)
             self.ctx.delay.sleep(NORMAL_ACTION)
             remaining = vision.count_inventory_items()
 
@@ -540,21 +583,31 @@ class Script:
         # Session-varied base speed: some drops faster, some slower
         speed_mult = rng.truncated_gauss(1.0, 0.15, 0.7, 1.4)
 
-        # Build set of slots adjacent to protected slots — suppress misclicks
-        # there to avoid accidentally dropping protected items.
+        # Build set of slots where misclicks are suppressed.
         # Grid is 4 cols x 7 rows; slot pitch is 42x36px, gap only 6x4px.
-        _near_protected: Set[int] = set()
+        #
+        # Danger zones:
+        # - Adjacent to protected (skip) slots — could drop rod/bait
+        # - Top row (0-3) — misclick up enters game view
+        # - Bottom row (24-27) — misclick down hits menu tabs
+        _no_misclick: Set[int] = set()
+
+        # Slots adjacent to protected items
         if skip_slots:
             for s in skip_slots:
                 if s % 4 != 0:
-                    _near_protected.add(s - 1)  # left
+                    _no_misclick.add(s - 1)  # left
                 if s % 4 != 3:
-                    _near_protected.add(s + 1)  # right
+                    _no_misclick.add(s + 1)  # right
                 if s >= 4:
-                    _near_protected.add(s - 4)  # above
+                    _no_misclick.add(s - 4)  # above
                 if s < 24:
-                    _near_protected.add(s + 4)  # below
-            _near_protected -= skip_slots  # don't include the protected slots themselves
+                    _no_misclick.add(s + 4)  # below
+            _no_misclick -= skip_slots
+
+        # Edge rows — misclicks could leave inventory area
+        _no_misclick |= set(range(4))       # top row
+        _no_misclick |= set(range(24, 28))  # bottom row
 
         # Choose drop style
         style = rng.weighted_choice(
@@ -564,33 +617,37 @@ class Script:
 
         if style == 'hold_shift':
             return self._drop_hold_shift(
-                order, skip_slots, expected, speed_mult, _near_protected,
+                order, skip_slots, expected, speed_mult, _no_misclick,
             )
         elif style == 'chunked':
             return self._drop_chunked(
-                order, skip_slots, expected, speed_mult, _near_protected,
+                order, skip_slots, expected, speed_mult, _no_misclick,
             )
         else:
             return self._drop_per_item(
-                order, skip_slots, expected, speed_mult, _near_protected,
+                order, skip_slots, expected, speed_mult, _no_misclick,
             )
 
     def _drop_delay(self, speed_mult: float) -> None:
-        """Variable delay between drops, shared across styles."""
+        """Variable delay between drops, shared across styles.
+
+        Tuned for spam-dropping: short delays with occasional brief pauses.
+        """
         rng = self.ctx.rng
-        # ~8% chance: brief pause mid-drop (distracted/thinking)
-        if rng.chance(0.08):
-            pause = rng.truncated_gauss(0.8, 0.3, 0.4, 1.8)
+        # ~6% chance: brief pause mid-drop (distracted/thinking)
+        if rng.chance(0.06):
+            pause = rng.truncated_gauss(0.5, 0.2, 0.25, 1.0)
             self.ctx.delay.sleep_range(pause * 0.8, pause * 1.2)
         else:
+            # Quick inter-drop delay — spammy feel
             item_speed = speed_mult * rng.truncated_gauss(1.0, 0.1, 0.8, 1.3)
-            base_min = FAST_ACTION.min_val * item_speed
-            base_max = FAST_ACTION.max_val * item_speed
+            base_min = 0.03 * item_speed
+            base_max = 0.12 * item_speed
             self.ctx.delay.sleep_range(base_min, base_max, include_pauses=False)
 
     def _drop_per_item(self, order: List[int], skip_slots: Optional[Set[int]],
                        expected: Optional[int], speed_mult: float,
-                       near_protected: Set[int]) -> int:
+                       no_misclick: Set[int]) -> int:
         """Original style: shift-click each item individually."""
         rng = self.ctx.rng
         dropped = 0
@@ -606,18 +663,18 @@ class Script:
 
             cx, cy = self.ctx.vision.slot_screen_click_point(slot_idx)
 
-            # ~4% chance: misclick (off by some pixels), then correct
-            if slot_idx not in near_protected and rng.chance(0.04):
-                ox = int(rng.truncated_gauss(0, 12, -20, 20))
-                oy = int(rng.truncated_gauss(0, 12, -20, 20))
+            # ~8% chance: misclick (off by some pixels), then correct
+            if slot_idx not in no_misclick and rng.chance(0.08):
+                ox = int(rng.truncated_gauss(0, 6, -12, 12))
+                oy = int(rng.truncated_gauss(0, 6, -12, 12))
                 self.ctx.input.shift_click(cx + ox, cy + oy)
-                self.ctx.delay.sleep(FAST_ACTION, include_pauses=False)
+                self._drop_delay(speed_mult)
                 self.ctx.input.shift_click(cx, cy)
 
             # ~3% chance: left-click instead of shift-click, then correct
             elif rng.chance(0.03):
                 self.ctx.input.click(cx, cy)
-                pause = rng.truncated_gauss(0.4, 0.15, 0.2, 0.8)
+                pause = rng.truncated_gauss(0.3, 0.1, 0.15, 0.5)
                 self.ctx.delay.sleep_range(pause * 0.8, pause * 1.2)
                 self.ctx.input.shift_click(cx, cy)
 
@@ -630,7 +687,7 @@ class Script:
 
     def _drop_hold_shift(self, order: List[int], skip_slots: Optional[Set[int]],
                          expected: Optional[int], speed_mult: float,
-                         near_protected: Set[int]) -> int:
+                         no_misclick: Set[int]) -> int:
         """Hold shift for the entire drop sequence, just click each slot."""
         rng = self.ctx.rng
         inp = self.ctx.input
@@ -653,12 +710,12 @@ class Script:
 
                 cx, cy = self.ctx.vision.slot_screen_click_point(slot_idx)
 
-                # ~4% chance: misclick, then correct (shift still held)
-                if slot_idx not in near_protected and rng.chance(0.04):
-                    ox = int(rng.truncated_gauss(0, 12, -20, 20))
-                    oy = int(rng.truncated_gauss(0, 12, -20, 20))
+                # ~8% chance: misclick, then correct (shift still held)
+                if slot_idx not in no_misclick and rng.chance(0.08):
+                    ox = int(rng.truncated_gauss(0, 6, -12, 12))
+                    oy = int(rng.truncated_gauss(0, 6, -12, 12))
                     inp.click(cx + ox, cy + oy)
-                    self.ctx.delay.sleep(FAST_ACTION, include_pauses=False)
+                    self._drop_delay(speed_mult)
                     inp.click(cx, cy)
                 else:
                     inp.click(cx, cy)
@@ -673,7 +730,7 @@ class Script:
 
     def _drop_chunked(self, order: List[int], skip_slots: Optional[Set[int]],
                       expected: Optional[int], speed_mult: float,
-                      near_protected: Set[int]) -> int:
+                      no_misclick: Set[int]) -> int:
         """Hold shift for chunks of items, release between chunks."""
         rng = self.ctx.rng
         inp = self.ctx.input
@@ -718,12 +775,12 @@ class Script:
 
                     cx, cy = self.ctx.vision.slot_screen_click_point(slot_idx)
 
-                    # ~4% chance: misclick, then correct
-                    if slot_idx not in near_protected and rng.chance(0.04):
-                        ox = int(rng.truncated_gauss(0, 12, -20, 20))
-                        oy = int(rng.truncated_gauss(0, 12, -20, 20))
+                    # ~8% chance: misclick, then correct
+                    if slot_idx not in no_misclick and rng.chance(0.08):
+                        ox = int(rng.truncated_gauss(0, 6, -12, 12))
+                        oy = int(rng.truncated_gauss(0, 6, -12, 12))
                         inp.click(cx + ox, cy + oy)
-                        self.ctx.delay.sleep(FAST_ACTION, include_pauses=False)
+                        self._drop_delay(speed_mult)
                         inp.click(cx, cy)
                     else:
                         inp.click(cx, cy)
@@ -736,7 +793,7 @@ class Script:
 
             # Pause between chunks — brief "re-grip" / distraction
             if chunk_idx < len(chunks) - 1 and not self.should_stop:
-                gap = rng.truncated_gauss(0.6, 0.25, 0.25, 1.2)
+                gap = rng.truncated_gauss(0.35, 0.15, 0.15, 0.7)
                 self.ctx.delay.sleep_range(gap * 0.8, gap * 1.2)
 
         return dropped

@@ -103,15 +103,29 @@ class RuneLiteManager:
     def _ensure_bot_home(self) -> None:
         runelite_dir = os.path.join(self.bot_home, ".runelite")
         repo_dir = os.path.join(runelite_dir, "repository2")
+        main_repo = os.path.expanduser("~/.runelite/repository2")
 
         os.makedirs(runelite_dir, exist_ok=True)
 
+        if not os.path.exists(main_repo):
+            return
+
+        needs_copy = False
         if not os.path.exists(repo_dir):
-            main_repo = os.path.expanduser("~/.runelite/repository2")
-            if os.path.exists(main_repo):
-                self._log("Copying JAR cache from main installation...")
-                shutil.copytree(main_repo, repo_dir)
-                self._log(f"Copied {len(os.listdir(repo_dir))} JAR files")
+            needs_copy = True
+        else:
+            # Re-sync if main repo is newer (RuneLite updated)
+            main_mtime = os.path.getmtime(main_repo)
+            bot_mtime = os.path.getmtime(repo_dir)
+            if main_mtime > bot_mtime:
+                self._log("Main JAR cache is newer (RuneLite updated), re-syncing...")
+                shutil.rmtree(repo_dir)
+                needs_copy = True
+
+        if needs_copy:
+            self._log("Copying JAR cache from main installation...")
+            shutil.copytree(main_repo, repo_dir)
+            self._log(f"Copied {len(os.listdir(repo_dir))} JAR files")
 
     def launch(self, require_credentials: bool = True) -> bool:
         if not self.is_available():

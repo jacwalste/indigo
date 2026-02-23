@@ -42,6 +42,19 @@ from .windmouse import (
     PathStats,
     WINDMOUSE_CONFIGS,
 )
+from .recorder import (
+    Recorder,
+    MouseEvent,
+    RawRecording,
+)
+from .replay import (
+    ReplayGenerator,
+    MovementTemplate,
+    PathLibrary,
+    build_library,
+    save_library,
+    load_library,
+)
 
 __all__ = [
     # RNG
@@ -80,4 +93,15 @@ __all__ = [
     "Path",
     "PathStats",
     "WINDMOUSE_CONFIGS",
+    # Recorder
+    "Recorder",
+    "MouseEvent",
+    "RawRecording",
+    # Replay
+    "ReplayGenerator",
+    "MovementTemplate",
+    "PathLibrary",
+    "build_library",
+    "save_library",
+    "load_library",
 ]

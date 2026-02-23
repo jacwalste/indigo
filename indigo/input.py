@@ -15,6 +15,7 @@ from pynput.keyboard import Controller as KeyboardController, Key
 from .core.windmouse import WindMouse
 from .core.delay import Delay
 from .core.rng import RNG
+from .core.replay import ReplayGenerator
 
 
 class Input:
@@ -26,14 +27,21 @@ class Input:
         windmouse: WindMouse,
         seed: Optional[int] = None,
         on_log: Optional[Callable[[str], None]] = None,
+        replay: Optional[ReplayGenerator] = None,
     ):
         self._delay = delay
         self._windmouse = windmouse
+        self._replay = replay
         self._rng = RNG(seed=seed)
         self._log_callback = on_log
 
         self._mouse: Optional[MouseController] = None
         self._keyboard: Optional[KeyboardController] = None
+
+        # Replay/windmouse usage tracking
+        self._replay_moves = 0
+        self._windmouse_moves = 0
+        self._log_interval = 25  # log every N moves
 
         # Click hold params (varied per session)
         self._click_hold_mean = 0.085
@@ -50,6 +58,11 @@ class Input:
             self._log_callback(f"[Input] {message}")
         else:
             print(f"[Input] {message}")
+
+    def _stopped(self) -> bool:
+        """Check if the stop flag has been set."""
+        sf = self._delay._stop_flag
+        return sf is not None and sf.is_set()
 
     def _ensure_controllers(self) -> None:
         if self._mouse is None:
@@ -76,7 +89,10 @@ class Input:
         return (int(pos[0]), int(pos[1]))
 
     def move_to(self, x: int, y: int) -> None:
-        """Move mouse to (x, y) using WindMouse path with variable speed.
+        """Move mouse to (x, y) using replay or WindMouse path with variable speed.
+
+        If a replay generator is available and has templates, uses recorded human
+        movement data with original timing. Otherwise falls back to WindMouse.
 
         Includes human-like imperfections:
         - Trackpad lift: ~6% chance on longer moves, pause + slight reposition
@@ -85,71 +101,130 @@ class Input:
         """
         self._ensure_controllers()
         cx, cy = self.get_mouse_position()
-        path = self._windmouse.generate(cx, cy, x, y)
-        points = path.get_points_as_int_tuples()
 
+        # Try replay first, fall back to windmouse
+        path = None
+        use_replay_timing = False
+        if self._replay and self._replay.template_count > 0:
+            path = self._replay.generate(cx, cy, x, y)
+            if path and path.timings and path.duration is not None:
+                use_replay_timing = True
+
+        if path is None:
+            path = self._windmouse.generate(cx, cy, x, y)
+
+        # Track usage
+        if use_replay_timing:
+            self._replay_moves += 1
+        else:
+            self._windmouse_moves += 1
+        total = self._replay_moves + self._windmouse_moves
+        if total > 0 and total % self._log_interval == 0:
+            self._log(f"Moves: {total} total (replay={self._replay_moves}, windmouse={self._windmouse_moves})")
+
+        points = path.get_points_as_int_tuples()
         n = len(points)
         direct_dist = math.sqrt((x - cx) ** 2 + (y - cy) ** 2)
 
-        # Pre-decide movement quirks for this move
-        # Trackpad lift: pause + slight reposition mid-movement
-        do_trackpad_lift = direct_dist > 150 and self._rng.chance(0.06)
+        # Pre-decide movement quirks — reduced frequency for replay paths
+        quirk_scale = 0.5 if use_replay_timing else 1.0
+        do_trackpad_lift = direct_dist > 150 and self._rng.chance(0.06 * quirk_scale)
         lift_at = self._rng.truncated_gauss(0.5, 0.12, 0.3, 0.7) if do_trackpad_lift else -1
 
-        # Micro-hesitation: brief freeze mid-movement
-        do_hesitate = self._rng.chance(0.12)
+        do_hesitate = self._rng.chance(0.12 * quirk_scale)
         hesitate_at = self._rng.truncated_gauss(0.5, 0.2, 0.2, 0.8) if do_hesitate else -1
 
-        # Speed zone: a random section of the path is faster or slower
-        zone_start = self._rng.truncated_gauss(0.3, 0.15, 0.1, 0.6)
-        zone_end = zone_start + self._rng.truncated_gauss(0.2, 0.08, 0.1, 0.35)
-        zone_mult = self._rng.truncated_gauss(1.0, 0.4, 0.5, 2.0)
+        if use_replay_timing:
+            # Use recorded timing from the template
+            timings = path.timings
+            duration = path.duration
 
-        for i, (px, py) in enumerate(points):
-            self._mouse.position = (px, py)
+            for i, (px, py) in enumerate(points):
+                if self._stopped():
+                    break
+                self._mouse.position = (px, py)
 
-            if i < n - 1:
-                t = i / max(n - 1, 1)
+                if i < n - 1:
+                    t = timings[i] if i < len(timings) else (i / max(n - 1, 1))
 
-                # Trackpad lift: pause, shift 1-3px, continue
-                if do_trackpad_lift and not self._lift_done and t >= lift_at:
-                    self._lift_done = True
-                    pause = self._rng.truncated_gauss(0.15, 0.05, 0.08, 0.25)
-                    time.sleep(pause)
-                    shift_x = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
-                    shift_y = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
-                    self._mouse.position = (px + shift_x, py + shift_y)
-                    time.sleep(self._rng.truncated_gauss(0.04, 0.015, 0.02, 0.07))
+                    # Quirks still fire at reduced rate
+                    if do_trackpad_lift and not self._lift_done and t >= lift_at:
+                        self._lift_done = True
+                        pause = self._rng.truncated_gauss(0.15, 0.05, 0.08, 0.25)
+                        time.sleep(pause)
+                        shift_x = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                        shift_y = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                        self._mouse.position = (px + shift_x, py + shift_y)
+                        time.sleep(self._rng.truncated_gauss(0.04, 0.015, 0.02, 0.07))
 
-                # Micro-hesitation: brief freeze
-                if do_hesitate and not self._hesitate_done and t >= hesitate_at:
-                    self._hesitate_done = True
-                    pause = self._rng.truncated_gauss(0.06, 0.02, 0.03, 0.10)
-                    time.sleep(pause)
+                    if do_hesitate and not self._hesitate_done and t >= hesitate_at:
+                        self._hesitate_done = True
+                        pause = self._rng.truncated_gauss(0.06, 0.02, 0.03, 0.10)
+                        time.sleep(pause)
 
-                # Distance to next point
-                nx, ny = points[i + 1]
-                step_dist = math.sqrt((nx - px) ** 2 + (ny - py) ** 2)
+                    # Compute delay from recorded timing
+                    next_t = timings[i + 1] if (i + 1) < len(timings) else 1.0
+                    delay = (next_t - t) * duration
 
-                # Speed curve: slow start, fast middle, gentle decel at end
-                speed_factor = 0.3 + 0.7 * math.sin(min(t * 1.3, 1.0) * math.pi)
+                    # Add small jitter (+/- 10%)
+                    jitter = self._rng.truncated_gauss(1.0, 0.05, 0.9, 1.1)
+                    delay *= jitter
 
-                # Apply speed zone variation
-                if zone_start <= t <= zone_end:
-                    speed_factor *= zone_mult
+                    delay = max(0.0005, min(delay, 0.15))
+                    time.sleep(delay)
+        else:
+            # WindMouse speed-curve timing (existing behavior)
+            zone_start = self._rng.truncated_gauss(0.3, 0.15, 0.1, 0.6)
+            zone_end = zone_start + self._rng.truncated_gauss(0.2, 0.08, 0.1, 0.35)
+            zone_mult = self._rng.truncated_gauss(1.0, 0.4, 0.5, 2.0)
 
-                # Base delay scales with step distance
-                base_ms = 0.5 + step_dist * 0.3
-                delay = (base_ms / max(speed_factor, 0.3)) / 1000.0
+            for i, (px, py) in enumerate(points):
+                if self._stopped():
+                    break
+                self._mouse.position = (px, py)
 
-                # Random jitter +/- 20%
-                jitter = self._rng.truncated_gauss(1.0, 0.1, 0.8, 1.2)
-                delay *= jitter
+                if i < n - 1:
+                    t = i / max(n - 1, 1)
 
-                # Clamp to reasonable range
-                delay = max(0.0005, min(delay, 0.012))
+                    # Trackpad lift: pause, shift 1-3px, continue
+                    if do_trackpad_lift and not self._lift_done and t >= lift_at:
+                        self._lift_done = True
+                        pause = self._rng.truncated_gauss(0.15, 0.05, 0.08, 0.25)
+                        time.sleep(pause)
+                        shift_x = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                        shift_y = int(self._rng.truncated_gauss(0, 1.5, -3, 3))
+                        self._mouse.position = (px + shift_x, py + shift_y)
+                        time.sleep(self._rng.truncated_gauss(0.04, 0.015, 0.02, 0.07))
 
-                time.sleep(delay)
+                    # Micro-hesitation: brief freeze
+                    if do_hesitate and not self._hesitate_done and t >= hesitate_at:
+                        self._hesitate_done = True
+                        pause = self._rng.truncated_gauss(0.06, 0.02, 0.03, 0.10)
+                        time.sleep(pause)
+
+                    # Distance to next point
+                    next_x, next_y = points[i + 1]
+                    step_dist = math.sqrt((next_x - px) ** 2 + (next_y - py) ** 2)
+
+                    # Speed curve: slow start, fast middle, gentle decel at end
+                    speed_factor = 0.3 + 0.7 * math.sin(min(t * 1.3, 1.0) * math.pi)
+
+                    # Apply speed zone variation
+                    if zone_start <= t <= zone_end:
+                        speed_factor *= zone_mult
+
+                    # Base delay scales with step distance
+                    base_ms = 0.5 + step_dist * 0.3
+                    delay = (base_ms / max(speed_factor, 0.3)) / 1000.0
+
+                    # Random jitter +/- 20%
+                    jitter = self._rng.truncated_gauss(1.0, 0.1, 0.8, 1.2)
+                    delay *= jitter
+
+                    # Clamp to reasonable range
+                    delay = max(0.0005, min(delay, 0.012))
+
+                    time.sleep(delay)
 
         # Reset per-move flags
         self._lift_done = False
@@ -169,6 +244,19 @@ class Input:
         self._ensure_controllers()
         self.move_to(x, y)
         hold = self._hold_duration()
+        self._mouse.press(Button.left)
+        time.sleep(hold)
+        self._mouse.release(Button.left)
+
+    def tap(self, x: int, y: int) -> None:
+        """Move to position and click with minimal hold — no drag risk.
+
+        Used for bank/deposit interface clicks where hold + mouse drift
+        causes OSRS to interpret the click as a drag (scrolling the bank).
+        """
+        self._ensure_controllers()
+        self.move_to(x, y)
+        hold = self._rng.truncated_gauss(0.015, 0.005, 0.008, 0.025)
         self._mouse.press(Button.left)
         time.sleep(hold)
         self._mouse.release(Button.left)
@@ -217,8 +305,19 @@ class Input:
         time.sleep(hold)
         self._keyboard.release(k)
 
+    def _interruptible_sleep(self, duration: float) -> bool:
+        """Sleep in small chunks, releasing immediately on stop. Returns True if interrupted."""
+        remaining = duration
+        while remaining > 0:
+            if self._stopped():
+                return True
+            chunk = min(remaining, 0.05)
+            time.sleep(chunk)
+            remaining -= chunk
+        return False
+
     def key_hold(self, key: str, duration: float) -> None:
-        """Hold a key for a specific duration.
+        """Hold a key for a specific duration. Releases immediately on stop.
 
         Args:
             key: Single character (e.g. 'w', 'a').
@@ -228,11 +327,11 @@ class Input:
         from pynput.keyboard import KeyCode
         k = KeyCode.from_char(key) if len(key) == 1 else getattr(Key, key)
         self._keyboard.press(k)
-        time.sleep(duration)
+        self._interruptible_sleep(duration)
         self._keyboard.release(k)
 
     def keys_hold(self, keys: list, duration: float) -> None:
-        """Hold multiple keys simultaneously for a duration.
+        """Hold multiple keys simultaneously for a duration. Releases immediately on stop.
 
         Args:
             keys: List of key strings (e.g. ['w', 'a'] or ['left', 'up']).
@@ -247,10 +346,9 @@ class Input:
 
         for k in resolved:
             self._keyboard.press(k)
-            # Tiny stagger between key presses — humans don't press simultaneously
             time.sleep(self._rng.truncated_gauss(0.02, 0.008, 0.008, 0.04))
 
-        time.sleep(duration)
+        self._interruptible_sleep(duration)
 
         for k in resolved:
             self._keyboard.release(k)

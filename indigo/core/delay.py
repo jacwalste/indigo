@@ -11,6 +11,7 @@ Combines all delay generation components into a single interface:
 This is the main delay interface for scripts to use.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Callable, List, Tuple, Dict
@@ -90,11 +91,13 @@ class Delay:
         seed: Optional[int] = None,
         on_log: Optional[Callable[[str], None]] = None,
         debug: bool = False,
+        stop_flag: Optional[threading.Event] = None,
     ):
         self._config = config or DelayConfig()
         self._log_callback = on_log
         self._debug = debug
         self._rng = RNG(seed=seed)
+        self._stop_flag = stop_flag
 
         self._timing = DelayGenerator(
             seed=self._rng.seed,
@@ -155,6 +158,10 @@ class Delay:
     @property
     def timing(self) -> DelayGenerator:
         return self._timing
+
+    def set_stop_flag(self, stop_flag: threading.Event) -> None:
+        """Set the stop flag for interruptible sleeps."""
+        self._stop_flag = stop_flag
 
     def start_session(self, variance: Optional[float] = None) -> None:
         self._is_running = True
@@ -283,6 +290,21 @@ class Delay:
 
         return total
 
+    def _interruptible_sleep(self, duration: float) -> bool:
+        """Sleep in small chunks, checking stop flag. Returns True if interrupted."""
+        if self._stop_flag is None:
+            time.sleep(duration)
+            return False
+        # Sleep in 50ms chunks so stop flag is checked frequently
+        remaining = duration
+        while remaining > 0:
+            if self._stop_flag.is_set():
+                return True
+            chunk = min(remaining, 0.05)
+            time.sleep(chunk)
+            remaining -= chunk
+        return False
+
     def sleep(
         self,
         profile: TimingProfile,
@@ -291,7 +313,7 @@ class Delay:
         include_fatigue: bool = True,
     ) -> float:
         d = self.delay(profile, include_pauses=include_pauses, include_stutters=include_stutters, include_fatigue=include_fatigue)
-        time.sleep(d)
+        self._interruptible_sleep(d)
         return d
 
     def sleep_range(
@@ -303,7 +325,7 @@ class Delay:
         include_fatigue: bool = True,
     ) -> float:
         d = self.delay_range(min_delay, max_delay, include_pauses=include_pauses, include_stutters=include_stutters, include_fatigue=include_fatigue)
-        time.sleep(d)
+        self._interruptible_sleep(d)
         return d
 
     def get_stats(self) -> Dict:

@@ -207,19 +207,43 @@ class StringingScript(Script):
         inv_before = self.ctx.vision.count_inventory_items()
         if inv_before > 0:
             self._log(f"Inventory not empty ({inv_before} items), depositing first")
-            self.click_region_jittered(GameRegions.BANK_DEPOSIT_BUTTON)
+            self.tap_region_jittered(GameRegions.BANK_DEPOSIT_BUTTON)
             self.ctx.delay.sleep(NORMAL_ACTION)
             self.ctx.delay.sleep_range(0.4, 0.8)
 
-        # Click first bank slot (unstrung bows)
-        self.click_region_jittered(GameRegions.BANK_LOG_SLOT)
+            # Verify deposit worked
+            inv_after = self.ctx.vision.count_inventory_items()
+            if inv_after > 0:
+                self._log(f"Deposit missed (still {inv_after} items), retrying...")
+                self.tap_region_jittered(GameRegions.BANK_DEPOSIT_BUTTON)
+                self.ctx.delay.sleep(NORMAL_ACTION)
+                self.ctx.delay.sleep_range(0.4, 0.8)
+
+                inv_after = self.ctx.vision.count_inventory_items()
+                if inv_after > 0:
+                    self._log(f"Deposit still failed ({inv_after} items), closing bank")
+                    self.ctx.input.key_tap('esc')
+                    self.ctx.delay.sleep(NORMAL_ACTION)
+                    self._state = State.FIND_BANK
+                    return
+
+        # Randomize withdrawal order — sometimes bows first, sometimes strings
+        if self.ctx.rng.chance(0.5):
+            first_slot = GameRegions.BANK_LOG_SLOT
+            second_slot = GameRegions.BANK_BOWSTRING_SLOT
+        else:
+            first_slot = GameRegions.BANK_BOWSTRING_SLOT
+            second_slot = GameRegions.BANK_LOG_SLOT
+
+        # Click first bank slot — tap to avoid drag-scroll
+        self.tap_region_jittered(first_slot)
         self.ctx.delay.sleep(NORMAL_ACTION)
 
         # Human-like pause between withdrawals
         self.ctx.delay.sleep_range(0.15, 0.4)
 
-        # Click second bank slot (bowstrings)
-        self.click_region_jittered(GameRegions.BANK_BOWSTRING_SLOT)
+        # Click second bank slot — tap to avoid drag-scroll
+        self.tap_region_jittered(second_slot)
         self.ctx.delay.sleep(NORMAL_ACTION)
 
         # Wait for inventory to fill
@@ -228,10 +252,10 @@ class StringingScript(Script):
         inv_count = self.ctx.vision.count_inventory_items()
         if inv_count < 28:
             self._log(f"Withdraw incomplete (inv={inv_count}), retrying...")
-            self.click_region_jittered(GameRegions.BANK_LOG_SLOT)
+            self.tap_region_jittered(first_slot)
             self.ctx.delay.sleep(NORMAL_ACTION)
             self.ctx.delay.sleep_range(0.15, 0.4)
-            self.click_region_jittered(GameRegions.BANK_BOWSTRING_SLOT)
+            self.tap_region_jittered(second_slot)
             self.ctx.delay.sleep(NORMAL_ACTION)
             self.ctx.delay.sleep_range(0.6, 1.2)
             inv_count = self.ctx.vision.count_inventory_items()
@@ -267,7 +291,7 @@ class StringingScript(Script):
         if self.ctx.rng.chance(0.85):
             self.ctx.input.key_tap('esc')
         else:
-            self.click_region_jittered(GameRegions.BANK_CLOSE_BUTTON)
+            self.tap_region_jittered(GameRegions.BANK_CLOSE_BUTTON)
             self._log("Closed bank via X button")
 
         self.ctx.delay.sleep(NORMAL_ACTION)
@@ -412,7 +436,8 @@ class StringingScript(Script):
             return
 
         # Idle while waiting — player would fidget during stringing
-        if self.ctx.idle and self.ctx.rng.chance(0.08):
+        # Re-check bank isn't open before allowing idle (zoom_adjust scrolls inside bank)
+        if self.ctx.idle and self.ctx.rng.chance(0.08) and not self._is_bank_open():
             self.ctx.idle.maybe_idle()
         else:
             time.sleep(XP_POLL_INTERVAL)

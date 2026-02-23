@@ -370,8 +370,8 @@ class BonfireScript(Script):
                 self._state = State.FIND_BANK
                 return
 
-        # Click the log slot in the bank interface
-        self.click_region_jittered(GameRegions.BANK_LOG_SLOT)
+        # Click the log slot in the bank interface — tap to avoid drag-scroll
+        self.tap_region_jittered(GameRegions.BANK_LOG_SLOT)
         self.ctx.delay.sleep(NORMAL_ACTION)
 
         # Wait for inventory to fill
@@ -380,7 +380,7 @@ class BonfireScript(Script):
         inv_count = self.ctx.vision.count_inventory_items()
         if inv_count == 0:
             self._log("Withdraw failed (inv empty), retrying click")
-            self.click_region_jittered(GameRegions.BANK_LOG_SLOT)
+            self.tap_region_jittered(GameRegions.BANK_LOG_SLOT)
             self.ctx.delay.sleep(NORMAL_ACTION)
             self.ctx.delay.sleep_range(0.5, 1.0)
             inv_count = self.ctx.vision.count_inventory_items()

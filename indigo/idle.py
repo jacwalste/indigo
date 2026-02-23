@@ -60,6 +60,17 @@ class IdleBehavior:
         self._afk_dur_mean = 90.0   # seconds per break
         self._next_afk_time = float('inf')  # disabled until start_session
 
+        # External interrupt — scripts can set this to abort idle early
+        self._interrupt_check: Optional[Callable[[], bool]] = None
+
+    def set_interrupt_check(self, fn: Optional[Callable[[], bool]]) -> None:
+        """Set a callback that aborts idle behaviors when it returns True.
+
+        Used by scripts that need to react quickly to game events (e.g.
+        wintertodt cold hits) even while idle actions are running.
+        """
+        self._interrupt_check = fn
+
     def _log(self, message: str) -> None:
         if self._log_callback:
             self._log_callback(f"[Idle] {message}")
@@ -67,7 +78,11 @@ class IdleBehavior:
             print(f"[Idle] {message}")
 
     def _stopped(self) -> bool:
-        return self._ctx.stop_flag.is_set()
+        if self._ctx.stop_flag.is_set():
+            return True
+        if self._interrupt_check and self._interrupt_check():
+            return True
+        return False
 
     def _safe_sleep(self, seconds: float) -> None:
         """Sleep in small increments, checking stop flag."""
@@ -75,7 +90,7 @@ class IdleBehavior:
         while time.time() < end:
             if self._stopped():
                 return
-            time.sleep(min(0.25, end - time.time()))
+            time.sleep(max(0, min(0.25, end - time.time())))
 
     def start_session(self) -> None:
         """Vary parameters for session personality."""
