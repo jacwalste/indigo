@@ -3,28 +3,43 @@ RuneLite Process Manager
 
 Handles RuneLite application lifecycle:
 - Launch with isolated home directory (no shared credentials)
-- Position window at (0,0) using AppleScript
+- Position window at (0,0) using AppleScript (macOS) or xdotool (Linux)
 - Graceful close and emergency force-kill
 """
 
 import os
 import subprocess
 import shutil
+import sys
 import time
 from typing import Optional, Callable, Tuple
+
+IS_LINUX = sys.platform.startswith("linux")
+IS_MACOS = sys.platform == "darwin"
 
 
 class RuneLiteManager:
     """
-    Manages RuneLite application lifecycle on macOS.
+    Manages RuneLite application lifecycle on macOS and Linux.
 
     Uses isolated home directory to separate bot credentials from main install.
     Credentials stored at ~/.indigo/runelite/.runelite/
+
+    On macOS: uses AppleScript for window management.
+    On Linux: uses xdotool for window management.
     """
 
-    DEFAULT_APP_LOCATIONS = [
+    DEFAULT_APP_LOCATIONS_MACOS = [
         "/Applications/RuneLite.app",
         os.path.expanduser("~/Applications/RuneLite.app"),
+    ]
+
+    # Linux: Bolt launcher installs RuneLite, or it may be a Flatpak/system package
+    DEFAULT_APP_LOCATIONS_LINUX = [
+        os.path.expanduser("~/.local/share/bolt-launcher/RuneLite.AppImage"),
+        os.path.expanduser("~/.local/share/bolt-launcher/runelite/RuneLite.AppImage"),
+        "/usr/share/runelite/RuneLite.jar",
+        os.path.expanduser("~/.runelite/RuneLite.jar"),
     ]
 
     DEFAULT_BOT_HOME = os.path.expanduser("~/.indigo/runelite")
@@ -53,7 +68,13 @@ class RuneLiteManager:
             print(f"[RuneLite] {message}")
 
     def _find_app(self) -> Optional[str]:
-        for path in self.DEFAULT_APP_LOCATIONS:
+        if IS_MACOS:
+            locations = self.DEFAULT_APP_LOCATIONS_MACOS
+        elif IS_LINUX:
+            locations = self.DEFAULT_APP_LOCATIONS_LINUX
+        else:
+            return None
+        for path in locations:
             if os.path.exists(path):
                 return path
         return None
@@ -61,8 +82,18 @@ class RuneLiteManager:
     def _find_executable(self) -> Optional[str]:
         if not self.app_path:
             return None
-        exe = os.path.join(self.app_path, "Contents", "MacOS", "RuneLite")
-        return exe if os.path.exists(exe) else None
+
+        if IS_MACOS:
+            exe = os.path.join(self.app_path, "Contents", "MacOS", "RuneLite")
+            return exe if os.path.exists(exe) else None
+
+        if IS_LINUX:
+            # AppImage or JAR — the app_path itself is the executable
+            if self.app_path.endswith(".AppImage") or self.app_path.endswith(".jar"):
+                return self.app_path
+            return None
+
+        return None
 
     def is_available(self) -> bool:
         return self.executable is not None
@@ -150,12 +181,28 @@ class RuneLiteManager:
             self._log(f"Credentials found for: {account}")
 
         try:
-            cmd = [
-                self.executable,
-                "--launch-mode=FORK",
-                f"-J-Duser.home={self.bot_home}",
-                "-p", self.profile
-            ]
+            if IS_LINUX and self.executable.endswith(".jar"):
+                cmd = [
+                    "java", "-jar", self.executable,
+                    f"-Duser.home={self.bot_home}",
+                    "--launch-mode=FORK",
+                    "-p", self.profile,
+                ]
+            elif IS_LINUX and self.executable.endswith(".AppImage"):
+                cmd = [
+                    self.executable,
+                    "--launch-mode=FORK",
+                    f"-J-Duser.home={self.bot_home}",
+                    "-p", self.profile,
+                ]
+            else:
+                # macOS .app bundle
+                cmd = [
+                    self.executable,
+                    "--launch-mode=FORK",
+                    f"-J-Duser.home={self.bot_home}",
+                    "-p", self.profile,
+                ]
 
             subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             time.sleep(3)
@@ -170,6 +217,28 @@ class RuneLiteManager:
         except Exception as e:
             self._log(f"Launch failed: {e}")
             return False
+
+    # -- Linux xdotool helpers --
+
+    def _xdotool_find_window(self) -> Optional[str]:
+        """Find the RuneLite window ID via xdotool. Returns the window ID string or None."""
+        try:
+            result = subprocess.run(
+                ["xdotool", "search", "--name", "RuneLite"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # xdotool may return multiple window IDs (one per line).
+                # Take the last one — it's usually the top-level frame.
+                window_ids = result.stdout.strip().splitlines()
+                return window_ids[-1].strip()
+        except FileNotFoundError:
+            self._log("xdotool not found — install with: sudo apt install xdotool")
+        except Exception:
+            pass
+        return None
+
+    # -- Window management --
 
     # Main game window is ~765px wide; loader/splash is much smaller
     MAIN_WINDOW_MIN_WIDTH = 500
@@ -209,6 +278,10 @@ class RuneLiteManager:
         return True
 
     def _window_exists(self) -> bool:
+        if IS_LINUX:
+            return self._xdotool_find_window() is not None
+
+        # macOS: AppleScript
         script = '''
         tell application "System Events"
             set runningApps to name of every process
@@ -232,6 +305,11 @@ class RuneLiteManager:
 
     def _position_window(self) -> bool:
         self._log(f"Positioning window at ({self.window_x}, {self.window_y})")
+
+        if IS_LINUX:
+            return self._position_window_linux()
+
+        # macOS: AppleScript
         script = f'''
         tell application "RuneLite" to activate
         delay 0.3
@@ -263,8 +341,35 @@ class RuneLiteManager:
             self._log(f"Failed to position window: {e}")
             return False
 
+    def _position_window_linux(self) -> bool:
+        """Position RuneLite window using xdotool on Linux."""
+        wid = self._xdotool_find_window()
+        if not wid:
+            self._log("No RuneLite window found via xdotool")
+            return False
+        try:
+            # Activate and move the window
+            subprocess.run(
+                ["xdotool", "windowactivate", "--sync", wid],
+                capture_output=True, timeout=5,
+            )
+            subprocess.run(
+                ["xdotool", "windowmove", wid,
+                 str(self.window_x), str(self.window_y)],
+                capture_output=True, timeout=5,
+            )
+            self._log(f"Window positioned at ({self.window_x}, {self.window_y})")
+            return True
+        except Exception as e:
+            self._log(f"Failed to position window: {e}")
+            return False
+
     def get_window_position(self) -> Optional[Tuple[int, int]]:
-        """Get RuneLite window position via AppleScript."""
+        """Get RuneLite window position via AppleScript (macOS) or xdotool (Linux)."""
+        if IS_LINUX:
+            return self._get_window_position_linux()
+
+        # macOS: AppleScript
         script = '''
         tell application "System Events"
             tell process "RuneLite"
@@ -287,8 +392,42 @@ class RuneLiteManager:
             pass
         return None
 
+    def _get_window_position_linux(self) -> Optional[Tuple[int, int]]:
+        """Get RuneLite window position via xdotool on Linux."""
+        wid = self._xdotool_find_window()
+        if not wid:
+            return None
+        try:
+            result = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", wid],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            # Output format: WINDOW=...\nX=...\nY=...\nWIDTH=...\nHEIGHT=...
+            vals = {}
+            for line in result.stdout.strip().splitlines():
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    vals[key] = val
+            x = int(vals.get("X", "0"))
+            y = int(vals.get("Y", "0"))
+            return (x, y)
+        except Exception:
+            pass
+        return None
+
     def get_window_size(self) -> Optional[Tuple[int, int]]:
-        """Get RuneLite window size via AppleScript."""
+        """Get RuneLite window size via AppleScript (macOS) or xdotool (Linux).
+
+        On macOS, AppleScript returns the full window size including the title bar.
+        On Linux, xdotool getwindowgeometry returns the client area size (no decorations),
+        so we report client width x client height to match what mss captures.
+        """
+        if IS_LINUX:
+            return self._get_window_size_linux()
+
+        # macOS: AppleScript
         script = '''
         tell application "System Events"
             tell process "RuneLite"
@@ -311,19 +450,92 @@ class RuneLiteManager:
             pass
         return None
 
+    def _get_window_size_linux(self) -> Optional[Tuple[int, int]]:
+        """Get RuneLite window size via xdotool on Linux.
+
+        xdotool getwindowgeometry returns client area dimensions (excludes decorations).
+        To match macOS behavior (which includes the title bar in the height), we add the
+        detected title bar height so verify_window_size comparisons work consistently.
+        """
+        wid = self._xdotool_find_window()
+        if not wid:
+            return None
+        try:
+            result = subprocess.run(
+                ["xdotool", "getwindowgeometry", "--shell", wid],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+            vals = {}
+            for line in result.stdout.strip().splitlines():
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    vals[key] = val
+            w = int(vals.get("WIDTH", "0"))
+            h = int(vals.get("HEIGHT", "0"))
+
+            # Add frame extents to match macOS "full window" size reporting
+            title_bar = self._detect_title_bar_height_linux(wid)
+            return (w, h + title_bar)
+        except Exception:
+            pass
+        return None
+
+    def _detect_title_bar_height_linux(self, wid: Optional[str] = None) -> int:
+        """Detect the window manager title bar height on Linux.
+
+        Uses _NET_FRAME_EXTENTS from xprop, which returns [left, right, top, bottom]
+        decoration sizes. Falls back to 30px (typical XFCE default).
+        """
+        if wid is None:
+            wid = self._xdotool_find_window()
+        if not wid:
+            return 30  # safe XFCE default
+
+        try:
+            result = subprocess.run(
+                ["xprop", "-id", wid, "_NET_FRAME_EXTENTS"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # Output: _NET_FRAME_EXTENTS(CARDINAL) = left, right, top, bottom
+            if result.returncode == 0 and "=" in result.stdout:
+                parts = result.stdout.split("=", 1)[1].strip().split(",")
+                if len(parts) >= 3:
+                    top = int(parts[2].strip())
+                    if top > 0:
+                        return top
+        except Exception:
+            pass
+        return 30  # fallback for XFCE
+
     def close(self, timeout: int = 10) -> bool:
         if not self.is_running():
             self._log("RuneLite not running")
             return True
 
         self._log("Closing RuneLite...")
-        try:
-            subprocess.run(
-                ["osascript", "-e", 'tell application "RuneLite" to quit'],
-                capture_output=True, timeout=5
-            )
-        except Exception:
-            pass
+
+        if IS_LINUX:
+            # Send WM_DELETE_WINDOW via xdotool for graceful close
+            wid = self._xdotool_find_window()
+            if wid:
+                try:
+                    subprocess.run(
+                        ["xdotool", "windowclose", wid],
+                        capture_output=True, timeout=5,
+                    )
+                except Exception:
+                    pass
+        else:
+            # macOS: AppleScript quit
+            try:
+                subprocess.run(
+                    ["osascript", "-e", 'tell application "RuneLite" to quit'],
+                    capture_output=True, timeout=5
+                )
+            except Exception:
+                pass
 
         start = time.time()
         while time.time() - start < timeout:

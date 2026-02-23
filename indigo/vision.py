@@ -9,6 +9,7 @@ Vision uses game_origin to offset these to absolute screen coordinates.
 """
 
 import random
+import sys
 from dataclasses import dataclass
 from typing import Optional, Callable, List, Tuple
 
@@ -18,7 +19,36 @@ import threading
 import numpy as np
 
 # macOS standard title bar height (content starts below this)
-TITLE_BAR_HEIGHT = 28
+TITLE_BAR_HEIGHT_MACOS = 28
+
+# XFCE/Linux default title bar height (fallback if detection fails)
+TITLE_BAR_HEIGHT_LINUX_DEFAULT = 30
+
+
+def get_title_bar_height(on_log: Optional[Callable[[str], None]] = None) -> int:
+    """Get the title bar height for the current platform.
+
+    On macOS: returns the fixed 28px value.
+    On Linux: attempts to detect via _NET_FRAME_EXTENTS on the RuneLite window
+    using RuneLiteManager._detect_title_bar_height_linux(). Falls back to 30px.
+    """
+    if sys.platform == "darwin":
+        return TITLE_BAR_HEIGHT_MACOS
+
+    if sys.platform.startswith("linux"):
+        try:
+            from .managers.runelite import RuneLiteManager
+            rl = RuneLiteManager(on_log=on_log)
+            height = rl._detect_title_bar_height_linux()
+            if on_log:
+                on_log(f"[Vision] Detected Linux title bar height: {height}px")
+            return height
+        except Exception:
+            pass
+        return TITLE_BAR_HEIGHT_LINUX_DEFAULT
+
+    # Unknown platform — use macOS default
+    return TITLE_BAR_HEIGHT_MACOS
 
 
 @dataclass
@@ -406,8 +436,9 @@ class Vision:
             log("Could not read window position, assuming (0, 0)")
             pos = (0, 0)
 
-        origin = (pos[0], pos[1] + TITLE_BAR_HEIGHT)
-        log(f"Window at {pos}, game_origin = {origin}")
+        title_bar = get_title_bar_height(on_log=on_log)
+        origin = (pos[0], pos[1] + title_bar)
+        log(f"Window at {pos}, title_bar={title_bar}px, game_origin = {origin}")
         return origin
 
     @staticmethod
@@ -429,7 +460,8 @@ class Vision:
             log("Could not read window size")
             return False
 
-        expected_w, expected_h = 765, 503 + TITLE_BAR_HEIGHT  # 765x531
+        title_bar = get_title_bar_height(on_log=on_log)
+        expected_w, expected_h = 765, 503 + title_bar
         w, h = size
         log(f"Window size: {w}x{h} (expected ~{expected_w}x{expected_h})")
 
