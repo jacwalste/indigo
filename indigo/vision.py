@@ -436,9 +436,15 @@ class Vision:
             log("Could not read window position, assuming (0, 0)")
             pos = (0, 0)
 
-        title_bar = get_title_bar_height(on_log=on_log)
-        origin = (pos[0], pos[1] + title_bar)
-        log(f"Window at {pos}, title_bar={title_bar}px, game_origin = {origin}")
+        if sys.platform.startswith("linux"):
+            # xdotool reports client area position (below title bar already)
+            origin = (pos[0], pos[1])
+            log(f"Window at {pos}, game_origin = {origin} (Linux: no title bar offset)")
+        else:
+            # macOS reports window frame position (includes title bar)
+            title_bar = get_title_bar_height(on_log=on_log)
+            origin = (pos[0], pos[1] + title_bar)
+            log(f"Window at {pos}, title_bar={title_bar}px, game_origin = {origin}")
         return origin
 
     @staticmethod
